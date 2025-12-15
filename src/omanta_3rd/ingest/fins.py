@@ -8,8 +8,22 @@ from typing import List, Dict, Any, Optional, Iterable
 from ..infra.db import connect_db, upsert
 from ..infra.jquants import JQuantsClient
 
+from datetime import date, datetime, timedelta
+
 
 # ---------- helpers ----------
+
+def _daterange(d1: str, d2: str):
+    start = datetime.strptime(d1, "%Y-%m-%d").date()
+    end = datetime.strptime(d2, "%Y-%m-%d").date()
+    d = start
+    while d <= end:
+        yield d.strftime("%Y-%m-%d")
+        d += timedelta(days=1)
+
+def fetch_financial_statements_by_date(client: JQuantsClient, disclosed_date: str):
+    # /fins/statements は date か code が必須。過去履歴は date で積むのが正解
+    return client.get_all_pages("/fins/statements", params={"date": disclosed_date})
 
 def _to_float(value: Any) -> Optional[float]:
     """値をfloatに変換（None/空文字はNone）"""
@@ -160,41 +174,37 @@ def ingest_financial_statements(
     sleep_sec: float = 0.2,
     batch_size: int = 2000,
 ):
-    """
-    財務データを取り込み
-
-    - code指定あり：その銘柄だけ
-    - code指定なし：listed_info最新日から全銘柄コードを取得して順に取得
-    """
     if client is None:
         client = JQuantsClient()
 
-    codes: Iterable[str]
-    if code:
-        codes = [code]
-    else:
-        codes = _get_all_codes_from_db()
-
     buffer: List[Dict[str, Any]] = []
-    total_codes = len(list(codes)) if not isinstance(codes, list) else len(codes)
 
-    # iterableが消費されないように、listに確定
-    if not isinstance(codes, list):
-        codes = list(codes)
+    if code:
+        # スポット用途：codeで取得（必要なら残す）
+        rows = fetch_financial_statements(client, code=code, date_from=date_from, date_to=date_to)
+        buffer.extend([_map_row_to_db(r) for r in rows])
+        save_financial_statements(buffer)
+        return
 
-    for i, c in enumerate(codes, start=1):
-        # 進捗（文字化け回避のため英数字中心）
-        print(f"[fins] code {i}/{len(codes)}: {c}")
+    # 通常：dateで履歴を積み上げる
+    if not date_from or not date_to:
+        raise ValueError("date_from と date_to は必須です（code指定がない場合）")
 
-        rows = fetch_financial_statements(client, code=c, date_from=date_from, date_to=date_to)
-        mapped = [_map_row_to_db(r) for r in rows]
-        buffer.extend(mapped)
+    total_days = 0
+    for d in _daterange(date_from, date_to):
+        total_days += 1
+
+        # 進捗（文字化けしにくい英数字）
+        print(f"[fins] date: {d}")
+
+        rows = fetch_financial_statements_by_date(client, disclosed_date=d)
+        if rows:
+            buffer.extend([_map_row_to_db(r) for r in rows])
 
         if len(buffer) >= batch_size:
             save_financial_statements(buffer)
             buffer.clear()
 
-        # レート制限対策（必要なら増やす）
         time.sleep(sleep_sec)
 
     if buffer:

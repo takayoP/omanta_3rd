@@ -55,9 +55,15 @@ def main(
     
     if update_financials:
         print("財務データを取得中...")
-        # 過去90日分を取得
-        date_from = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
-        ingest_financial_statements(date_from, date, client=client)
+
+        if start_date and end_date:
+            # 指定された日付範囲を使用（財務にも適用）
+            ingest_financial_statements(date_from=start_date, date_to=end_date, client=client)
+        else:
+            # デフォルト: 過去90日分を取得
+            date_from = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
+            ingest_financial_statements(date_from=date_from, date_to=date, client=client)
+
         print("財務データの取得が完了しました。")
     
     print("ETL更新が完了しました。")
@@ -77,16 +83,8 @@ if __name__ == "__main__":
         default="all",
         help="更新対象（listed: 銘柄情報, prices: 価格データ, fins: 財務データ, all: すべて）",
     )
-    parser.add_argument(
-        "--start",
-        type=str,
-        help="開始日（YYYY-MM-DD、価格データ取得時に使用）",
-    )
-    parser.add_argument(
-        "--end",
-        type=str,
-        help="終了日（YYYY-MM-DD、価格データ取得時に使用）",
-    )
+    parser.add_argument("--start", type=str, help="開始日（YYYY-MM-DD、prices/fins 取得時に使用）")
+    parser.add_argument("--end", type=str, help="終了日（YYYY-MM-DD、prices/fins 取得時に使用）")
     
     args = parser.parse_args()
     
