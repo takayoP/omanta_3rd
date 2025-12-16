@@ -8570,4 +8570,3 @@ python -m omanta_3rd.jobs.etl_update --target prices --start 2025-09-01 --end 20
 # 月次実行（特徴量計算 + ポートフォリオ選定）
 python -m omanta_3rd.jobs.monthly_run
 ```
-

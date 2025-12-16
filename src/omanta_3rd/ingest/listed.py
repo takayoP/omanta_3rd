@@ -10,42 +10,33 @@ from ..infra.jquants import JQuantsClient
 
 def _normalize_code(code: Any) -> str:
     """
-    J-QuantsのCodeは5桁（例: '72030'）の場合があるので、
-    DBは4桁に統一（末尾0なら落とす）。
+    J-QuantsのCodeは5桁（例: '72030'）の場合があるため、
+    DBでは4桁に統一する。
+    - 5桁なら先頭4桁に落とす（安全側）
     """
     if code is None:
         return ""
     s = str(code).strip()
-    if len(s) == 5 and s.endswith("0"):
+    if len(s) == 5:
         return s[:4]
     return s
 
 
 def fetch_listed_info(client: JQuantsClient, date: str) -> List[Dict[str, Any]]:
     """
-    銘柄情報を取得してDBスキーマに合わせて変換
-
-    Args:
-        client: J-Quants APIクライアント
-        date: 取得日（YYYY-MM-DD）
-
-    Returns:
-        DBに保存する形式の銘柄情報リスト
+    /listed/info から銘柄情報を取得し、DBスキーマに合わせて変換して返す
     """
-    # J-Quants /listed/info のレスポンスは {"info":[...]} だが
-    # client.get_all_pages は配列キーを自動検出して list を返す実装
     rows = client.get_all_pages("/listed/info", params={"date": date})
 
     result: List[Dict[str, Any]] = []
     for item in rows:
         result.append(
             {
+                # API側にもDateがあるが、引数dateを優先してもOK
                 "date": item.get("Date") or date,
                 "code": _normalize_code(item.get("Code")),
                 "company_name": item.get("CompanyName") or "",
-                # 正しいキーは MarketCodeName
                 "market_name": item.get("MarketCodeName") or "",
-                # DBは名称で持つ（同業比較に使いやすい）
                 "sector17": item.get("Sector17CodeName") or "",
                 "sector33": item.get("Sector33CodeName") or "",
             }
@@ -55,12 +46,7 @@ def fetch_listed_info(client: JQuantsClient, date: str) -> List[Dict[str, Any]]:
 
 
 def save_listed_info(data: List[Dict[str, Any]]):
-    """
-    銘柄情報をDBに保存
-
-    Args:
-        data: 銘柄情報のリスト
-    """
+    """銘柄情報をDBに保存（UPSERT）"""
     if not data:
         return
     with connect_db() as conn:
@@ -68,13 +54,7 @@ def save_listed_info(data: List[Dict[str, Any]]):
 
 
 def ingest_listed_info(date: str, client: Optional[JQuantsClient] = None):
-    """
-    銘柄情報を取り込み
-
-    Args:
-        date: 取得日（YYYY-MM-DD）
-        client: J-Quants APIクライアント（Noneの場合は新規作成）
-    """
+    """銘柄情報を取り込み"""
     if client is None:
         client = JQuantsClient()
 

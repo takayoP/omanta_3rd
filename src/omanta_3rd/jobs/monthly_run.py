@@ -15,7 +15,7 @@ import argparse
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,7 @@ from ..infra.db import connect_db, upsert
 
 
 # -----------------------------
-# Configuration (tune later)
+# Configuration
 # -----------------------------
 
 @dataclass(frozen=True)
@@ -36,13 +36,12 @@ class StrategyParams:
 
     # Hard filters
     roe_min: float = 0.10
-    require_roe_trend_positive: bool = True
     liquidity_quantile_cut: float = 0.20  # drop bottom 20% by liquidity_60d
 
     # Sector cap (33-sector)
     sector_cap: int = 4
 
-    # Scoring weights (sum ~ 1.0)
+    # Scoring weights
     w_quality: float = 0.35
     w_value: float = 0.25
     w_growth: float = 0.15
@@ -64,12 +63,6 @@ PARAMS = StrategyParams()
 # Utilities
 # -----------------------------
 
-def _to_dt(s: Optional[str]) -> Optional[pd.Timestamp]:
-    if not s:
-        return None
-    return pd.to_datetime(s, errors="coerce")
-
-
 def _safe_div(a, b):
     try:
         if a is None or b is None:
@@ -90,7 +83,6 @@ def _clip01(x):
 
 
 def _pct_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
-    # rank(pct=True) returns [0..1], but NaN -> NaN
     return series.rank(pct=True, ascending=ascending)
 
 
@@ -101,25 +93,17 @@ def _log_safe(x: float) -> float:
 
 
 def _calc_slope(values: List[float]) -> float:
-    """
-    Slope of values over time index 0..n-1 using simple linear regression.
-    Returns NaN if not enough points.
-    """
     v = [x for x in values if x is not None and not pd.isna(x)]
     n = len(v)
     if n < 3:
         return np.nan
     x = np.arange(n, dtype=float)
     y = np.array(v, dtype=float)
-    # slope of y ~ a*x + b
     a, _b = np.polyfit(x, y, 1)
     return float(a)
 
 
 def _rsi_from_series(close: pd.Series, n: int) -> float:
-    """
-    Simple RSI (Wilder-style approximated via rolling mean of gains/losses).
-    """
     if close is None or close.size < n + 1:
         return np.nan
     delta = close.diff()
@@ -128,8 +112,10 @@ def _rsi_from_series(close: pd.Series, n: int) -> float:
 
     avg_gain = gain.rolling(n).mean().iloc[-1]
     avg_loss = loss.rolling(n).mean().iloc[-1]
-    if pd.isna(avg_gain) or pd.isna(avg_loss) or avg_loss == 0:
-        return np.nan if avg_loss != 0 else 100.0
+    if pd.isna(avg_gain) or pd.isna(avg_loss):
+        return np.nan
+    if avg_loss == 0:
+        return 100.0
     rs = avg_gain / avg_loss
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return float(rsi)
@@ -148,22 +134,16 @@ def _bb_zscore(close: pd.Series, n: int) -> float:
 
 
 def _entry_score(close: pd.Series) -> float:
-    """
-    Entry score from BB(-2sigma) and RSI(<=30) with N in {20,60,90}.
-    Returns [0..1] (higher is "better entry").
-    """
     scores = []
     for n in (20, 60, 90):
         z = _bb_zscore(close, n)
         rsi = _rsi_from_series(close, n)
+
         bb_score = np.nan
         rsi_score = np.nan
 
-        # BB: below -2σ => higher score
         if not pd.isna(z):
             bb_score = _clip01((-2.0 - z) / 2.0)  # z=-2 => 0, z=-4 => 1
-
-        # RSI: <=30 => higher score
         if not pd.isna(rsi):
             rsi_score = _clip01((30.0 - rsi) / 30.0)  # rsi=30 => 0, rsi=0 => 1
 
@@ -176,7 +156,6 @@ def _entry_score(close: pd.Series) -> float:
 
     if not scores:
         return np.nan
-    # Use max to prioritize "best entry" signal among windows
     return float(np.nanmax(scores))
 
 
@@ -202,7 +181,6 @@ def _snap_listed_date(conn, asof: str) -> str:
     ).fetchone()
     d = row["d"] if row else None
     if not d:
-        # fallback to latest
         row2 = conn.execute("SELECT MAX(date) AS d FROM listed_info").fetchone()
         d = row2["d"] if row2 else None
     if not d:
@@ -220,18 +198,12 @@ def _load_universe(conn, listed_date: str) -> pd.DataFrame:
         conn,
         params=(listed_date,),
     )
-    # Prime only
-    df = df[df["market_name"] == "プライム"].copy()
+    # Prime only (表記ゆれ耐性)
+    df = df[df["market_name"].astype(str).str.contains("プライム|Prime", na=False)].copy()
     return df
 
 
 def _load_prices_window(conn, price_date: str, lookback_days: int = 200) -> pd.DataFrame:
-    """
-    Load a rolling window of prices up to price_date for all codes.
-    Note: For large history, optimize with DuckDB/Parquet later.
-    """
-    # We don't have a trading calendar table; use date range by simple heuristic:
-    # fetch rows where date <= price_date and keep last N rows per code in pandas.
     df = pd.read_sql_query(
         """
         SELECT date, code, adj_close, turnover_value
@@ -243,15 +215,11 @@ def _load_prices_window(conn, price_date: str, lookback_days: int = 200) -> pd.D
     )
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values(["code", "date"])
-    # Keep last lookback_days per code
     df = df.groupby("code", group_keys=False).tail(lookback_days)
     return df
 
 
 def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
-    """
-    Latest FY (actual) per code with disclosed_date <= asof.
-    """
     df = pd.read_sql_query(
         """
         SELECT *
@@ -264,7 +232,6 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
     )
     if df.empty:
         return df
-
     df["disclosed_date"] = pd.to_datetime(df["disclosed_date"], errors="coerce")
     df["current_period_end"] = pd.to_datetime(df["current_period_end"], errors="coerce")
     df = df.sort_values(["code", "disclosed_date", "current_period_end"])
@@ -273,10 +240,6 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
 
 
 def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
-    """
-    FY history per code with disclosed_date <= asof.
-    Limit by most recent N fiscal periods per code (approx years).
-    """
     df = pd.read_sql_query(
         """
         SELECT code, disclosed_date, current_period_end,
@@ -298,10 +261,6 @@ def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
 
 
 def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
-    """
-    Latest statement (any period) per code with disclosed_date <= asof.
-    Used for forecast_* fields (forward PER, forecast OP, etc).
-    """
     df = pd.read_sql_query(
         """
         SELECT code, disclosed_date,
@@ -326,11 +285,6 @@ def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
 # -----------------------------
 
 def build_features(conn, asof: str) -> pd.DataFrame:
-    """
-    Build features for asof (snapped to available price date).
-    Returns a DataFrame with one row per code.
-    """
-    # snap dates
     price_date = _snap_price_date(conn, asof)
     listed_date = _snap_listed_date(conn, price_date)
 
@@ -342,43 +296,47 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     prices_win = _load_prices_window(conn, price_date, lookback_days=200)
     print(f"[count] prices rows (window): {len(prices_win)}")
 
-    # Today's price (adj_close) at price_date
     px_today = prices_win[prices_win["date"] == pd.to_datetime(price_date)][["code", "adj_close"]].copy()
     px_today = px_today.rename(columns={"adj_close": "price"})
     print(f"[count] prices today codes: {len(px_today)}")
 
-    # Liquidity (60d avg turnover_value)
+    # Liquidity (60d avg turnover_value) - fixed (no Series groupby(as_index=False))
     tmp = prices_win[["code", "date", "turnover_value"]].copy()
     tmp = tmp.sort_values(["code", "date"])
     tmp = tmp.groupby("code", group_keys=False).tail(60)
     liq = tmp.groupby("code", as_index=False)["turnover_value"].mean()
     liq = liq.rename(columns={"turnover_value": "liquidity_60d"})
 
-
-    # merge core frame
-    df = universe.merge(px_today, on="code", how="inner")
-    df = df.merge(liq, on="code", how="left")
     fy_latest = _load_latest_fy(conn, price_date)
     print(f"[count] latest FY rows: {len(fy_latest)}")
-    df = df.merge(fy_latest, on="code", how="left", suffixes=("", "_fy"))
+
     fc_latest = _load_latest_forecast(conn, price_date)
     print(f"[count] latest forecast rows: {len(fc_latest)}")
+
+    fy_hist = _load_fy_history(conn, price_date, years=10)
+    print(f"[count] FY history rows (<=10 per code): {len(fy_hist)}")
+
+    df = universe.merge(px_today, on="code", how="inner")
+    df = df.merge(liq, on="code", how="left")
+    df = df.merge(fy_latest, on="code", how="left", suffixes=("", "_fy"))
     df = df.merge(fc_latest, on="code", how="left", suffixes=("", "_fc"))
 
     print(f"[count] merged base rows: {len(df)}")
 
-    # --- Actual ROE (latest FY) ---
+    # Actual ROE (latest FY)
     df["roe"] = df.apply(lambda r: _safe_div(r.get("profit"), r.get("equity")), axis=1)
-    # --- Valuation (PBR from latest FY) ---
+
+    # PBR from latest FY
     df["pbr"] = df.apply(lambda r: _safe_div(r.get("price"), r.get("bvps")), axis=1)
-    # --- Forward PER (forecast eps from latest statement) ---
-    df["forward_per"] = df.apply(lambda r: _safe_div(r.get("price"), r.get("forecast_eps")), axis=1)
 
-    # --- Growth (forecast / last FY) ---
-    df["op_growth"] = df.apply(lambda r: _safe_div(r.get("forecast_operating_profit"), r.get("operating_profit")) - 1.0, axis=1)
-    df["profit_growth"] = df.apply(lambda r: _safe_div(r.get("forecast_profit"), r.get("profit")) - 1.0, axis=1)
+    # Forward PER from forecast_eps
+    df["forward_per"] = df.apply(lambda r: _safe_div(r.get("price"), r.get("forecast_eps_fc")), axis=1)
 
-    # --- Record high (forecast OP vs past max FY OP) ---
+    # Growth from forecasts vs latest FY
+    df["op_growth"] = df.apply(lambda r: _safe_div(r.get("forecast_operating_profit_fc"), r.get("operating_profit")) - 1.0, axis=1)
+    df["profit_growth"] = df.apply(lambda r: _safe_div(r.get("forecast_profit_fc"), r.get("profit")) - 1.0, axis=1)
+
+    # Record high (forecast OP vs past max FY OP)
     if not fy_hist.empty:
         op_max = fy_hist.groupby("code", as_index=False)["operating_profit"].max().rename(columns={"operating_profit": "op_max_past"})
         df = df.merge(op_max, on="code", how="left")
@@ -388,25 +346,26 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     df["record_high_forecast_flag"] = (
         (df["forecast_operating_profit"].notna()) &
         (df["op_max_past"].notna()) &
-        (df["forecast_operating_profit"] >= df["op_max_past"])
+        (df["forecast_operating_profit_fc"] >= df["op_max_past"])
     ).astype(int)
 
-    # --- ROE trend (5y slope) ---
+    # Operating profit trend (5y slope)  ← A案
     if not fy_hist.empty:
-        # compute roe per FY row
         fh = fy_hist.copy()
-        fh["roe"] = fh.apply(lambda r: _safe_div(r.get("profit"), r.get("equity")), axis=1)
+        fh["current_period_end"] = pd.to_datetime(fh["current_period_end"], errors="coerce")
         fh = fh.sort_values(["code", "current_period_end"])
+
         slopes = []
         for code, g in fh.groupby("code"):
-            vals = g["roe"].tail(5).tolist()
+            vals = g["operating_profit"].tail(5).tolist()
             slopes.append((code, _calc_slope(vals)))
-        slope_df = pd.DataFrame(slopes, columns=["code", "roe_trend"])
-        df = df.merge(slope_df, on="code", how="left")
-    else:
-        df["roe_trend"] = np.nan
 
-    # --- Market cap (prefer shares_outstanding - treasury_shares, fallback equity/bvps) ---
+        op_trend_df = pd.DataFrame(slopes, columns=["code", "op_trend"])
+        df = df.merge(op_trend_df, on="code", how="left")
+    else:
+        df["op_trend"] = np.nan
+
+    # Market cap
     def _market_cap(row):
         price = row.get("price")
         if price is None or pd.isna(price):
@@ -417,7 +376,6 @@ def build_features(conn, asof: str) -> pd.DataFrame:
             shares = so - (ts if ts is not None and not pd.isna(ts) else 0.0)
             if shares and shares > 0:
                 return price * shares
-        # fallback: shares ~= equity / bvps
         eq = row.get("equity")
         bvps = row.get("bvps")
         shares2 = _safe_div(eq, bvps)
@@ -427,41 +385,50 @@ def build_features(conn, asof: str) -> pd.DataFrame:
 
     df["market_cap"] = df.apply(_market_cap, axis=1)
 
-    # --- Entry score (BB/RSI) ---
+    # Entry score
     if PARAMS.use_entry_score:
-        # build close series per code
         close_map = {c: g["adj_close"].reset_index(drop=True) for c, g in prices_win.groupby("code")}
         df["entry_score"] = df["code"].apply(lambda c: _entry_score(close_map.get(c)) if c in close_map else np.nan)
     else:
         df["entry_score"] = np.nan
 
-    # --- Industry-relative valuation scores ---
-    # Lower forward_per and lower pbr are better (rank ascending then invert)
+    # Industry-relative valuation scores
     df["forward_per_pct"] = df.groupby("sector33")["forward_per"].transform(lambda s: _pct_rank(s, ascending=True))
     df["pbr_pct"] = df.groupby("sector33")["pbr"].transform(lambda s: _pct_rank(s, ascending=True))
+    df["value_score"] = PARAMS.w_forward_per * (1.0 - df["forward_per_pct"]) + PARAMS.w_pbr * (1.0 - df["pbr_pct"])
 
-    df["value_score"] = (
-        PARAMS.w_forward_per * (1.0 - df["forward_per_pct"]) +
-        PARAMS.w_pbr * (1.0 - df["pbr_pct"])
+    # Size score
+    df["log_mcap"] = df["market_cap"].apply(_log_safe)
+    df["size_score"] = _pct_rank(df["log_mcap"], ascending=True)
+
+    # Quality score: ROE only（ROE改善は不要という方針）
+    df["roe_score"] = _pct_rank(df["roe"], ascending=True)
+    df["quality_score"] = df["roe_score"]
+
+    df["op_growth_score"] = _pct_rank(df["op_growth"], ascending=True).fillna(0.5)
+    df["profit_growth_score"] = _pct_rank(df["profit_growth"], ascending=True).fillna(0.5)
+    df["op_trend_score"] = _pct_rank(df["op_trend"], ascending=True).fillna(0.5)
+
+    df["growth_score"] = (
+        0.4 * df["op_growth_score"] +
+        0.4 * df["profit_growth_score"] +
+        0.2 * df["op_trend_score"]
     )
 
-    # Size score (bigger is better)
-    df["log_mcap"] = df["market_cap"].apply(_log_safe)
-    df["size_score"] = _pct_rank(df["log_mcap"], ascending=True)  # bigger log -> higher pct
-
-    # Quality score
-    df["roe_score"] = _pct_rank(df["roe"], ascending=True)
-    df["roe_trend_score"] = _pct_rank(df["roe_trend"], ascending=True)
-
-    df["quality_score"] = 0.75 * df["roe_score"] + 0.25 * df["roe_trend_score"]
-
-    # Growth score (forecast growth; NaN -> median-ish behavior by pct rank)
-    df["op_growth_score"] = _pct_rank(df["op_growth"], ascending=True)
-    df["profit_growth_score"] = _pct_rank(df["profit_growth"], ascending=True)
-    df["growth_score"] = 0.5 * df["op_growth_score"] + 0.5 * df["profit_growth_score"]
-
-    # Record-high score: 1/0 -> rank
+    # Record-high score
     df["record_high_score"] = df["record_high_forecast_flag"].astype(float)
+
+    # ---- Make scores robust against NaN (critical) ----
+    # Neutral defaults (0.5) for percentile-like scores
+    df["value_score"] = df["value_score"].fillna(0.5)
+    df["growth_score"] = df["growth_score"].fillna(0.5)
+    df["size_score"] = df["size_score"].fillna(0.5)
+
+    # quality: if roe missing -> 0 (will be filtered out later by ROE>=0.1 anyway)
+    df["quality_score"] = df["quality_score"].fillna(0.0)
+
+    # record-high: if missing -> 0
+    df["record_high_score"] = df["record_high_score"].fillna(0.0)
 
     # Core score
     df["core_score"] = (
@@ -472,14 +439,16 @@ def build_features(conn, asof: str) -> pd.DataFrame:
         PARAMS.w_size * df["size_score"]
     )
 
-    # Keep only required columns for saving
+    df["core_score"] = df["core_score"].fillna(0.0)
+
     out_cols = [
         "code", "sector33",
         "liquidity_60d", "market_cap",
-        "roe", "roe_trend",
+        "roe",
         "pbr", "forward_per",
         "op_growth", "profit_growth",
         "record_high_forecast_flag",
+        "op_trend",
         "core_score", "entry_score",
     ]
     feat = df[out_cols].copy()
@@ -493,20 +462,14 @@ def build_features(conn, asof: str) -> pd.DataFrame:
 # -----------------------------
 
 def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
-    """
-    Select 20-30 stocks from features snapshot.
-    Returns DataFrame: rebalance_date, code, weight, core_score, entry_score, reason
-    """
     if feat.empty:
         return feat
 
-    # Counts before filters
     print(f"[count] features rows before filters: {len(feat)}")
 
-    # Hard filters
     f = feat.copy()
 
-    # liquidity filter (drop bottom quantile)
+    # liquidity filter
     q = f["liquidity_60d"].quantile(PARAMS.liquidity_quantile_cut)
     f = f[(f["liquidity_60d"].notna()) & (f["liquidity_60d"] >= q)]
     print(f"[count] after liquidity filter: {len(f)} (cut={PARAMS.liquidity_quantile_cut}, q={q})")
@@ -515,15 +478,6 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
     f = f[(f["roe"].notna()) & (f["roe"] >= PARAMS.roe_min)]
     print(f"[count] after ROE>= {PARAMS.roe_min}: {len(f)}")
 
-    # ROE trend positive
-    if PARAMS.require_roe_trend_positive:
-        f = f[(f["roe_trend"].notna()) & (f["roe_trend"] > 0)]
-        print(f"[count] after ROE trend > 0: {len(f)}")
-
-    # record high forecast flag (soft -> NOT hard filter by default)
-    # If you want it hard, uncomment:
-    # f = f[f["record_high_forecast_flag"] == 1]
-    # print(f"[count] after record high forecast filter: {len(f)}")
 
     if f.empty:
         print("[warn] 0 rows after filters. Consider relaxing filters or check data availability.")
@@ -550,7 +504,6 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
         if len(selected_rows) >= PARAMS.target_max:
             break
 
-    # If too few due to sector cap, relax cap
     if len(selected_rows) < PARAMS.target_min:
         print(f"[warn] too few after sector cap ({len(selected_rows)}). Relaxing sector cap.")
         selected_rows = pool.head(PARAMS.target_max).to_dict("records")
@@ -559,37 +512,24 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
     if sel.empty:
         return sel
 
-    # Determine weights (equal weight)
     n = len(sel)
     sel["weight"] = 1.0 / n
 
-    # Add reason (JSON-ish string; keep simple)
-    def _reason(row) -> str:
-        return (
-            f"roe={row.get('roe'):.3f if not pd.isna(row.get('roe')) else 'nan'}, "
-            f"roe_trend={row.get('roe_trend'):.4f if not pd.isna(row.get('roe_trend')) else 'nan'}, "
-            f"forward_per={row.get('forward_per'):.2f if not pd.isna(row.get('forward_per')) else 'nan'}, "
-            f"pbr={row.get('pbr'):.2f if not pd.isna(row.get('pbr')) else 'nan'}, "
-            f"op_growth={row.get('op_growth'):.2f if not pd.isna(row.get('op_growth')) else 'nan'}, "
-            f"record_high_fc={int(row.get('record_high_forecast_flag') if not pd.isna(row.get('record_high_forecast_flag')) else 0)}"
-        )
+    def fmt(x, fstr):
+        return "nan" if x is None or pd.isna(x) else format(float(x), fstr)
 
-    # pandas formatting in f-string is tricky; use safe conversions
-    def _reason2(row) -> str:
-        def fmt(x, f):
-            return "nan" if x is None or pd.isna(x) else format(float(x), f)
-        return (
-            f"roe={fmt(row.get('roe'),'0.3f')},"
-            f"roe_trend={fmt(row.get('roe_trend'),'0.4f')},"
-            f"forward_per={fmt(row.get('forward_per'),'0.2f')},"
-            f"pbr={fmt(row.get('pbr'),'0.2f')},"
-            f"op_growth={fmt(row.get('op_growth'),'0.2f')},"
-            f"record_high_fc={int(row.get('record_high_forecast_flag') if not pd.isna(row.get('record_high_forecast_flag')) else 0)}"
-        )
+    sel["reason"] = sel.apply(
+        lambda r: (
+            f"roe={fmt(r.get('roe'),'0.3f')},"
+            f"forward_per={fmt(r.get('forward_per'),'0.2f')},"
+            f"pbr={fmt(r.get('pbr'),'0.2f')},"
+            f"op_growth={fmt(r.get('op_growth'),'0.2f')},"
+            f"op_trend={fmt(r.get('op_trend'),'0.2f')},"
+            f"record_high_fc={int(r.get('record_high_forecast_flag') if not pd.isna(r.get('record_high_forecast_flag')) else 0)}"
+        ),
+        axis=1,
+    )
 
-    sel["reason"] = sel.apply(_reason2, axis=1)
-
-    # Build portfolio table schema
     out = sel[["code", "weight", "core_score", "entry_score", "reason"]].copy()
     out.insert(0, "rebalance_date", feat["as_of_date"].iloc[0])
 
@@ -603,26 +543,19 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
 def save_features(conn, feat: pd.DataFrame):
     if feat.empty:
         return
-    # Map to list[dict] for upsert
     rows = feat.to_dict("records")
-    upsert(
-        conn,
-        "features_monthly",
-        rows,
-        conflict_columns=["as_of_date", "code"],
-    )
+    upsert(conn, "features_monthly", rows, conflict_columns=["as_of_date", "code"])
 
 
 def save_portfolio(conn, pf: pd.DataFrame):
     if pf.empty:
         return
+    rebalance_date = pf["rebalance_date"].iloc[0]
+    conn.execute("DELETE FROM portfolio_monthly WHERE rebalance_date = ?", (rebalance_date,))
+    conn.commit()
+
     rows = pf.to_dict("records")
-    upsert(
-        conn,
-        "portfolio_monthly",
-        rows,
-        conflict_columns=["rebalance_date", "code"],
-    )
+    upsert(conn, "portfolio_monthly", rows, conflict_columns=["rebalance_date", "code"])
 
 
 # -----------------------------
@@ -630,24 +563,21 @@ def save_portfolio(conn, pf: pd.DataFrame):
 # -----------------------------
 
 def main(asof: Optional[str] = None):
-    # asof is the user-specified date; use it first
     run_date = asof or EXECUTION_DATE or datetime.now().strftime("%Y-%m-%d")
-
     print(f"[monthly] start | asof={run_date}")
 
     with connect_db() as conn:
         feat = build_features(conn, run_date)
         print(f"[monthly] features built: {len(feat)} codes")
 
-        # Save features snapshot
         save_features(conn, feat)
 
-        # Selection
         pf = select_portfolio(feat)
         print(f"[monthly] selected: {len(pf)} codes")
 
-        # Save portfolio
         save_portfolio(conn, pf)
+
+
 
     print("[monthly] done")
 
