@@ -344,7 +344,7 @@ def build_features(conn, asof: str) -> pd.DataFrame:
         df["op_max_past"] = np.nan
 
     df["record_high_forecast_flag"] = (
-        (df["forecast_operating_profit"].notna()) &
+        (df["forecast_operating_profit_fc"].notna()) &
         (df["op_max_past"].notna()) &
         (df["forecast_operating_profit_fc"] >= df["op_max_past"])
     ).astype(int)

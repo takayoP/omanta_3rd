@@ -1,0 +1,16 @@
+実行可能なコマンド
+
+# データベース初期化
+python -m omanta_3rd.jobs.init_db
+
+# ETL更新（銘柄情報）
+python -m omanta_3rd.jobs.etl_update --target listed --date 2025-12-13
+
+# ETL更新（価格データ、日付範囲指定）
+python -m omanta_3rd.jobs.etl_update --target prices --start 2025-09-01 --end 2025-12-13
+
+# ETL更新（財務データ）
+python -m omanta_3rd.jobs.etl_update --target fins --start 2025-09-01 --end 2025-12-13
+
+# 月次実行（特徴量計算 + ポートフォリオ選定）
+python -m omanta_3rd.jobs.monthly_run
