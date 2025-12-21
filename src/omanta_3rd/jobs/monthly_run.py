@@ -291,6 +291,11 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
     最新のFY実績データを取得
     開示日が最新のものを選ぶ（当期末ではなく開示日を基準にする）
     主要項目（operating_profit, profit, equity）が全て欠損のレコードは除外
+    
+    同じcurrent_period_endのFYデータ間で相互補完を行う：
+    - operating_profitが欠損しているが、forecast_operating_profitがあるレコードから補完
+    - forecast_operating_profitが欠損しているが、operating_profitがあるレコードから補完
+    - profit, forecast_profit, forecast_epsについても同様
     """
     df = pd.read_sql_query(
         """
@@ -302,7 +307,8 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
         FROM fins_statements
         WHERE disclosed_date <= ?
           AND type_of_current_period = 'FY'
-          AND (operating_profit IS NOT NULL OR profit IS NOT NULL OR equity IS NOT NULL)
+          AND (operating_profit IS NOT NULL OR profit IS NOT NULL OR equity IS NOT NULL
+               OR forecast_operating_profit IS NOT NULL OR forecast_profit IS NOT NULL OR forecast_eps IS NOT NULL)
         """,
         conn,
         params=(asof,),
@@ -313,18 +319,72 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
     df["disclosed_date"] = pd.to_datetime(df["disclosed_date"], errors="coerce")
     df["current_period_end"] = pd.to_datetime(df["current_period_end"], errors="coerce")
     
-    # 開示日が最新のものを選ぶ（当期末ではなく開示日を基準にする）
     # 欠損があるレコードは除外（会計基準変更などで古い開示日のデータがNULLに書き換えられている可能性があるため）
+    # ただし、forecast_*がある場合は含める（相互補完のため）
     df = df[
         (df["operating_profit"].notna()) |
         (df["profit"].notna()) |
-        (df["equity"].notna())
+        (df["equity"].notna()) |
+        (df["forecast_operating_profit"].notna()) |
+        (df["forecast_profit"].notna()) |
+        (df["forecast_eps"].notna())
     ].copy()
     if df.empty:
         return pd.DataFrame()
     
-    df = df.sort_values(["code", "disclosed_date"])
-    latest = df.groupby("code", as_index=False).tail(1).copy()
+    # 同じcurrent_period_endのFYデータ間で相互補完
+    # 各code、current_period_endごとに、全てのレコードを集約して補完
+    result_rows = []
+    for (code, period_end), group in df.groupby(["code", "current_period_end"]):
+        # 開示日が最新のレコードをベースにする
+        group_sorted = group.sort_values("disclosed_date", ascending=False)
+        base_row = group_sorted.iloc[0].copy()
+        
+        # 同じcurrent_period_endの全レコードから、欠損している項目を補完
+        # operating_profitが欠損している場合、forecast_operating_profitから補完（最新の開示日のものを優先）
+        if pd.isna(base_row["operating_profit"]):
+            for _, row in group_sorted.iterrows():
+                if pd.notna(row["forecast_operating_profit"]):
+                    base_row["operating_profit"] = row["forecast_operating_profit"]
+                    break
+        
+        # forecast_operating_profitが欠損している場合、operating_profitから補完（最新の開示日のものを優先）
+        if pd.isna(base_row["forecast_operating_profit"]):
+            for _, row in group_sorted.iterrows():
+                if pd.notna(row["operating_profit"]):
+                    base_row["forecast_operating_profit"] = row["operating_profit"]
+                    break
+        
+        # profitとforecast_profitの相互補完
+        if pd.isna(base_row["profit"]):
+            for _, row in group_sorted.iterrows():
+                if pd.notna(row["forecast_profit"]):
+                    base_row["profit"] = row["forecast_profit"]
+                    break
+        
+        if pd.isna(base_row["forecast_profit"]):
+            for _, row in group_sorted.iterrows():
+                if pd.notna(row["profit"]):
+                    base_row["forecast_profit"] = row["profit"]
+                    break
+        
+        # forecast_epsが欠損している場合、epsから補完（最新の開示日のものを優先）
+        if pd.isna(base_row["forecast_eps"]):
+            for _, row in group_sorted.iterrows():
+                if pd.notna(row["eps"]):
+                    base_row["forecast_eps"] = row["eps"]
+                    break
+        
+        result_rows.append(base_row)
+    
+    if not result_rows:
+        return pd.DataFrame()
+    
+    result_df = pd.DataFrame(result_rows)
+    
+    # 開示日が最新のものを選ぶ（当期末ではなく開示日を基準にする）
+    result_df = result_df.sort_values(["code", "disclosed_date"])
+    latest = result_df.groupby("code", as_index=False).tail(1).copy()
     
     return latest
 
@@ -370,6 +430,12 @@ def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
 
 
 def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
+    """
+    最新の予想データを取得
+    FYを優先し、同じ開示日の場合FYを優先
+    注意: _load_latest_fyで既に同じcurrent_period_endのFYデータ間で相互補完を行っているため、
+          この関数は主に四半期データから予想を取得する場合に使用される
+    """
     df = pd.read_sql_query(
         """
         SELECT code, disclosed_date, type_of_current_period,
@@ -657,6 +723,85 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     incomplete_core = incomplete_value | incomplete_growth | missing_roe | missing_market_cap | missing_record_high
     core_incomplete_pct = (incomplete_core.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
     print(f"  core_score不完全（いずれかのサブスコアが不完全）: {incomplete_core.sum()}/{len(df)} ({core_incomplete_pct:.1f}%)")
+    
+    # 各サブスコアの不完全さを加重平均して、core_scoreへの影響度を定量化
+    print("\n[missing_impact] 各サブスコアの不完全さがcore_scoreに与える影響度（加重平均）:")
+    
+    # 各サブスコアの不完全な割合
+    incomplete_rates = {
+        "quality_score": quality_incomplete_pct / 100.0,
+        "value_score": value_incomplete_pct / 100.0,
+        "growth_score": growth_incomplete_pct / 100.0,
+        "record_high_score": record_high_incomplete_pct / 100.0,
+        "size_score": size_incomplete_pct / 100.0,
+    }
+    
+    # 各サブスコアの重み
+    weights = {
+        "quality_score": PARAMS.w_quality,
+        "value_score": PARAMS.w_value,
+        "growth_score": PARAMS.w_growth,
+        "record_high_score": PARAMS.w_record_high,
+        "size_score": PARAMS.w_size,
+    }
+    
+    # 不完全なスコアがデフォルト値（0.5または0.0）を使っている場合の影響度を計算
+    # 完全なスコアの平均値とデフォルト値の差を推定
+    # 実際のスコア分布から平均値を計算（不完全でない銘柄のみ）
+    
+    # quality_score: 不完全な場合は0.0（デフォルト）、完全な場合は実際のスコア
+    if not df[~missing_roe].empty and "quality_score" in df.columns:
+        complete_quality_mean = df[~missing_roe]["quality_score"].mean()
+        quality_impact = incomplete_rates["quality_score"] * weights["quality_score"] * abs(complete_quality_mean - 0.0)
+        print(f"  quality_score影響度: {quality_impact:.4f} (不完全率: {incomplete_rates['quality_score']*100:.1f}%, 重み: {weights['quality_score']:.2f}, 完全時平均: {complete_quality_mean:.3f})")
+    else:
+        quality_impact = 0.0
+    
+    # value_score: 不完全な場合は0.5（デフォルト）、完全な場合は実際のスコア
+    if not df[~incomplete_value].empty and "value_score" in df.columns:
+        complete_value_mean = df[~incomplete_value]["value_score"].mean()
+        value_impact = incomplete_rates["value_score"] * weights["value_score"] * abs(complete_value_mean - 0.5)
+        print(f"  value_score影響度: {value_impact:.4f} (不完全率: {incomplete_rates['value_score']*100:.1f}%, 重み: {weights['value_score']:.2f}, 完全時平均: {complete_value_mean:.3f})")
+    else:
+        value_impact = 0.0
+    
+    # growth_score: 不完全な場合は0.5（デフォルト）、完全な場合は実際のスコア
+    if not df[~incomplete_growth].empty and "growth_score" in df.columns:
+        complete_growth_mean = df[~incomplete_growth]["growth_score"].mean()
+        growth_impact = incomplete_rates["growth_score"] * weights["growth_score"] * abs(complete_growth_mean - 0.5)
+        print(f"  growth_score影響度: {growth_impact:.4f} (不完全率: {incomplete_rates['growth_score']*100:.1f}%, 重み: {weights['growth_score']:.2f}, 完全時平均: {complete_growth_mean:.3f})")
+    else:
+        growth_impact = 0.0
+    
+    # record_high_score: 不完全な場合は0.0（デフォルト）、完全な場合は実際のスコア
+    if not df[~missing_record_high].empty and "record_high_score" in df.columns:
+        complete_record_high_mean = df[~missing_record_high]["record_high_score"].mean()
+        record_high_impact = incomplete_rates["record_high_score"] * weights["record_high_score"] * abs(complete_record_high_mean - 0.0)
+        print(f"  record_high_score影響度: {record_high_impact:.4f} (不完全率: {incomplete_rates['record_high_score']*100:.1f}%, 重み: {weights['record_high_score']:.2f}, 完全時平均: {complete_record_high_mean:.3f})")
+    else:
+        record_high_impact = 0.0
+    
+    # size_score: 不完全な場合は0.5（デフォルト）、完全な場合は実際のスコア
+    if not df[~missing_market_cap].empty and "size_score" in df.columns:
+        complete_size_mean = df[~missing_market_cap]["size_score"].mean()
+        size_impact = incomplete_rates["size_score"] * weights["size_score"] * abs(complete_size_mean - 0.5)
+        print(f"  size_score影響度: {size_impact:.4f} (不完全率: {incomplete_rates['size_score']*100:.1f}%, 重み: {weights['size_score']:.2f}, 完全時平均: {complete_size_mean:.3f})")
+    else:
+        size_impact = 0.0
+    
+    # 全体の影響度（加重平均）
+    total_impact = quality_impact + value_impact + growth_impact + record_high_impact + size_impact
+    print(f"\n  [総合] core_scoreへの総合影響度: {total_impact:.4f}")
+    print(f"    (core_scoreの理論的最大値は1.0、平均値は約0.5と想定)")
+    
+    # 各サブスコアの影響度の割合
+    if total_impact > 0:
+        print(f"\n  [影響度の内訳]")
+        print(f"    quality_score: {quality_impact/total_impact*100:.1f}%")
+        print(f"    value_score: {value_impact/total_impact*100:.1f}%")
+        print(f"    growth_score: {growth_impact/total_impact*100:.1f}%")
+        print(f"    record_high_score: {record_high_impact/total_impact*100:.1f}%")
+        print(f"    size_score: {size_impact/total_impact*100:.1f}%")
     
     # フィルタ後の不完全なスコアの割合
     if "liquidity_60d" in df.columns and "roe" in df.columns:
