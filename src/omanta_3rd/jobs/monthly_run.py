@@ -143,9 +143,11 @@ def _entry_score(close: pd.Series) -> float:
         rsi_score = np.nan
 
         if not pd.isna(z):
-            bb_score = _clip01((-2.0 - z) / 2.0)  # z=-2 => 0, z=-4 => 1
+            # さらに緩やかな閾値: z=-0.5 => 0, z=-3 => 1 (以前は z=-2 => 0, z=-4 => 1)
+            bb_score = _clip01((-0.5 - z) / 2.5)
         if not pd.isna(rsi):
-            rsi_score = _clip01((30.0 - rsi) / 30.0)  # rsi=30 => 0, rsi=0 => 1
+            # さらに緩やかな閾値: rsi=40 => 0, rsi=0 => 1 (以前は rsi=30 => 0, rsi=0 => 1)
+            rsi_score = _clip01((40.0 - rsi) / 40.0)
 
         if not pd.isna(bb_score) and not pd.isna(rsi_score):
             scores.append(0.5 * bb_score + 0.5 * rsi_score)
@@ -219,27 +221,123 @@ def _load_prices_window(conn, price_date: str, lookback_days: int = 200) -> pd.D
     return df
 
 
+def _save_fy_to_statements(conn, fy_df: pd.DataFrame):
+    """
+    FYデータをfins_statementsテーブルに保存
+    
+    Args:
+        conn: データベース接続
+        fy_df: FYデータのDataFrame
+    """
+    if fy_df.empty:
+        return
+    
+    # 保存用のデータを作成
+    save_data = []
+    for _, row in fy_df.iterrows():
+        # datetimeオブジェクトを文字列に変換
+        disclosed_date = row["disclosed_date"]
+        if pd.notna(disclosed_date):
+            if hasattr(disclosed_date, 'strftime'):
+                disclosed_date = disclosed_date.strftime("%Y-%m-%d")
+            else:
+                disclosed_date = str(disclosed_date)
+        else:
+            disclosed_date = None
+        
+        current_period_end = row["current_period_end"]
+        if pd.notna(current_period_end):
+            if hasattr(current_period_end, 'strftime'):
+                current_period_end = current_period_end.strftime("%Y-%m-%d")
+            else:
+                current_period_end = str(current_period_end)
+        else:
+            current_period_end = None
+        
+        # fins_statementsテーブルの全カラムを含む辞書を作成
+        save_row = {
+            "disclosed_date": disclosed_date,
+            "disclosed_time": row.get("disclosed_time"),
+            "code": str(row["code"]),
+            "type_of_current_period": row.get("type_of_current_period", "FY"),
+            "current_period_end": current_period_end,
+            "operating_profit": row.get("operating_profit") if pd.notna(row.get("operating_profit")) else None,
+            "profit": row.get("profit") if pd.notna(row.get("profit")) else None,
+            "equity": row.get("equity") if pd.notna(row.get("equity")) else None,
+            "eps": row.get("eps") if pd.notna(row.get("eps")) else None,
+            "bvps": row.get("bvps") if pd.notna(row.get("bvps")) else None,
+            "forecast_operating_profit": row.get("forecast_operating_profit") if pd.notna(row.get("forecast_operating_profit")) else None,
+            "forecast_profit": row.get("forecast_profit") if pd.notna(row.get("forecast_profit")) else None,
+            "forecast_eps": row.get("forecast_eps") if pd.notna(row.get("forecast_eps")) else None,
+            "next_year_forecast_operating_profit": row.get("next_year_forecast_operating_profit") if pd.notna(row.get("next_year_forecast_operating_profit")) else None,
+            "next_year_forecast_profit": row.get("next_year_forecast_profit") if pd.notna(row.get("next_year_forecast_profit")) else None,
+            "next_year_forecast_eps": row.get("next_year_forecast_eps") if pd.notna(row.get("next_year_forecast_eps")) else None,
+            "shares_outstanding": row.get("shares_outstanding") if pd.notna(row.get("shares_outstanding")) else None,
+            "treasury_shares": row.get("treasury_shares") if pd.notna(row.get("treasury_shares")) else None,
+        }
+        save_data.append(save_row)
+    
+    # データベースに保存（UPSERT）
+    upsert(
+        conn,
+        "fins_statements",
+        save_data,
+        conflict_columns=["disclosed_date", "code", "type_of_current_period", "current_period_end"],
+    )
+
+
 def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
+    """
+    最新のFY実績データを取得
+    開示日が最新のものを選ぶ（当期末ではなく開示日を基準にする）
+    主要項目（operating_profit, profit, equity）が全て欠損のレコードは除外
+    """
     df = pd.read_sql_query(
         """
-        SELECT *
+        SELECT disclosed_date, disclosed_time, code, type_of_current_period, current_period_end,
+               operating_profit, profit, equity, eps, bvps,
+               forecast_operating_profit, forecast_profit, forecast_eps,
+               next_year_forecast_operating_profit, next_year_forecast_profit, next_year_forecast_eps,
+               shares_outstanding, treasury_shares
         FROM fins_statements
         WHERE disclosed_date <= ?
           AND type_of_current_period = 'FY'
+          AND (operating_profit IS NOT NULL OR profit IS NOT NULL OR equity IS NOT NULL)
         """,
         conn,
         params=(asof,),
     )
     if df.empty:
-        return df
+        return pd.DataFrame()
+    
     df["disclosed_date"] = pd.to_datetime(df["disclosed_date"], errors="coerce")
     df["current_period_end"] = pd.to_datetime(df["current_period_end"], errors="coerce")
-    df = df.sort_values(["code", "disclosed_date", "current_period_end"])
+    
+    # 開示日が最新のものを選ぶ（当期末ではなく開示日を基準にする）
+    # 欠損があるレコードは除外（会計基準変更などで古い開示日のデータがNULLに書き換えられている可能性があるため）
+    df = df[
+        (df["operating_profit"].notna()) |
+        (df["profit"].notna()) |
+        (df["equity"].notna())
+    ].copy()
+    if df.empty:
+        return pd.DataFrame()
+    
+    df = df.sort_values(["code", "disclosed_date"])
     latest = df.groupby("code", as_index=False).tail(1).copy()
+    
     return latest
 
 
 def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
+    """
+    過去のFY実績データを取得（最大years年分）
+    各current_period_endごとに開示日が最新のものを選ぶ
+    主要項目（operating_profit, profit, equity）が全て欠損のレコードは除外
+    
+    注意: 欠損値は四半期データで補完しない（会計基準変更などで古い開示日のデータが
+          NULLに書き換えられている可能性があるため）
+    """
     df = pd.read_sql_query(
         """
         SELECT code, disclosed_date, current_period_end,
@@ -248,22 +346,33 @@ def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
         FROM fins_statements
         WHERE disclosed_date <= ?
           AND type_of_current_period = 'FY'
+          AND (operating_profit IS NOT NULL OR profit IS NOT NULL OR equity IS NOT NULL)
         """,
         conn,
         params=(asof,),
     )
     if df.empty:
         return df
+    df["disclosed_date"] = pd.to_datetime(df["disclosed_date"], errors="coerce")
     df["current_period_end"] = pd.to_datetime(df["current_period_end"], errors="coerce")
-    df = df.sort_values(["code", "current_period_end"])
-    df = df.groupby("code", group_keys=False).tail(years)
+    # 各current_period_endごとに開示日が最新のものを選ぶ
+    df = df.sort_values(["code", "current_period_end", "disclosed_date"])
+    df = df.groupby(["code", "current_period_end"], as_index=False).tail(1)
+    # その中で、current_period_endが新しい順に並べて、最大years年分を取得
+    df = df.sort_values(["code", "current_period_end"], ascending=[True, False])
+    df = df.groupby("code", group_keys=False).head(years)
+    
+    # 注意: 履歴データの補完処理は実行しない
+    # （会計基準変更などで古い開示日のデータがNULLに書き換えられている可能性があるため、
+    #   forecastデータで補完するよりも、欠損のない直近のFYレコードを使用する方が適切）
+    
     return df
 
 
 def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
     df = pd.read_sql_query(
         """
-        SELECT code, disclosed_date,
+        SELECT code, disclosed_date, type_of_current_period,
                forecast_operating_profit, forecast_profit, forecast_eps,
                next_year_forecast_operating_profit, next_year_forecast_profit, next_year_forecast_eps
         FROM fins_statements
@@ -275,8 +384,15 @@ def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
     if df.empty:
         return df
     df["disclosed_date"] = pd.to_datetime(df["disclosed_date"], errors="coerce")
-    df = df.sort_values(["code", "disclosed_date"])
+    # FYを優先するため、period_priorityを設定（FY=0、その他=1）
+    df["period_priority"] = df["type_of_current_period"].apply(
+        lambda x: 0 if x == "FY" else 1
+    )
+    # 開示日が最新のものを選び、同じ開示日の場合FYを優先
+    df = df.sort_values(["code", "disclosed_date", "period_priority"])
     latest = df.groupby("code", as_index=False).tail(1).copy()
+    # period_priorityカラムを削除（不要なため）
+    latest = latest.drop(columns=["period_priority"])
     return latest
 
 
@@ -322,6 +438,23 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     df = df.merge(fc_latest, on="code", how="left", suffixes=("", "_fc"))
 
     print(f"[count] merged base rows: {len(df)}")
+    
+    # マージ後の埋まり率を表示（デバッグ用）
+    print("\n[coverage] マージ後のデータ埋まり率:")
+    key_columns = [
+        "forecast_eps_fc",
+        "forecast_operating_profit_fc",
+        "forecast_profit_fc",
+        "operating_profit",
+        "profit",
+        "equity",
+        "bvps",
+    ]
+    for col in key_columns:
+        if col in df.columns:
+            non_null_count = df[col].notna().sum()
+            coverage = (non_null_count / len(df)) * 100.0 if len(df) > 0 else 0.0
+            print(f"  {col}: {non_null_count}/{len(df)} ({coverage:.1f}%)")
 
     # Actual ROE (latest FY)
     df["roe"] = df.apply(lambda r: _safe_div(r.get("profit"), r.get("equity")), axis=1)
@@ -384,6 +517,50 @@ def build_features(conn, asof: str) -> pd.DataFrame:
         return price * shares2
 
     df["market_cap"] = df.apply(_market_cap, axis=1)
+    
+    # 計算後の埋まり率を表示（デバッグ用）
+    print("\n[coverage] 計算後の特徴量埋まり率:")
+    feature_columns = [
+        "forward_per",
+        "op_growth",
+        "profit_growth",
+        "roe",
+        "pbr",
+        "market_cap",
+    ]
+    for col in feature_columns:
+        if col in df.columns:
+            non_null_count = df[col].notna().sum()
+            coverage = (non_null_count / len(df)) * 100.0 if len(df) > 0 else 0.0
+            print(f"  {col}: {non_null_count}/{len(df)} ({coverage:.1f}%)")
+    
+    # fc_latestのcode型/桁の確認（デバッグ用）
+    if not fc_latest.empty and "code" in fc_latest.columns:
+        fc_codes = set(fc_latest["code"].astype(str).str.strip())
+        df_codes = set(df["code"].astype(str).str.strip())
+        matched = len(fc_codes & df_codes)
+        print(f"\n[debug] fc_latest code matching: {matched}/{len(df_codes)} ({matched/len(df_codes)*100:.1f}% if df_codes > 0)")
+        if matched < len(df_codes) * 0.8:  # 80%未満の場合は警告
+            print(f"  [warning] fc_latestのcodeマッチ率が低いです。code型/桁の不一致の可能性があります。")
+            sample_fc = list(fc_codes)[:5] if fc_codes else []
+            sample_df = list(df_codes)[:5] if df_codes else []
+            print(f"  sample fc_latest codes: {sample_fc}")
+            print(f"  sample df codes: {sample_df}")
+    
+    # 予想があるのに実績がないケースを確認（デバッグ用）
+    has_forecast_op = df["forecast_operating_profit_fc"].notna()
+    has_actual_op = df["operating_profit"].notna()
+    forecast_only = df[has_forecast_op & ~has_actual_op]
+    if len(forecast_only) > 0:
+        print(f"\n[debug] 予想営業利益があるのに実績営業利益がない銘柄: {len(forecast_only)}件")
+        print(f"  sample codes: {forecast_only['code'].head(10).tolist()}")
+    
+    has_forecast_profit = df["forecast_profit_fc"].notna()
+    has_actual_profit = df["profit"].notna()
+    forecast_profit_only = df[has_forecast_profit & ~has_actual_profit]
+    if len(forecast_profit_only) > 0:
+        print(f"[debug] 予想利益があるのに実績利益がない銘柄: {len(forecast_profit_only)}件")
+        print(f"  sample codes: {forecast_profit_only['code'].head(10).tolist()}")
 
     # Entry score
     if PARAMS.use_entry_score:
@@ -440,6 +617,72 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     )
 
     df["core_score"] = df["core_score"].fillna(0.0)
+    
+    # 欠損値による影響の分析
+    print("\n[missing_impact] 欠損値による不完全なスコアの割合:")
+    
+    # 各サブスコアの元となる特徴量が欠損していたかどうかを記録
+    # （fillna前の状態を確認するため、計算前に記録が必要だが、ここでは計算結果から逆算）
+    
+    # value_scoreが不完全（forward_perまたはpbrが欠損）の場合
+    missing_forward_per = df["forward_per"].isna()
+    missing_pbr = df["pbr"].isna()
+    incomplete_value = missing_forward_per | missing_pbr
+    value_incomplete_pct = (incomplete_value.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
+    print(f"  value_score不完全（forward_perまたはpbr欠損）: {incomplete_value.sum()}/{len(df)} ({value_incomplete_pct:.1f}%)")
+    
+    # growth_scoreが不完全（op_growthまたはprofit_growthが欠損）の場合
+    missing_op_growth = df["op_growth"].isna()
+    missing_profit_growth = df["profit_growth"].isna()
+    incomplete_growth = missing_op_growth | missing_profit_growth
+    growth_incomplete_pct = (incomplete_growth.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
+    print(f"  growth_score不完全（op_growthまたはprofit_growth欠損）: {incomplete_growth.sum()}/{len(df)} ({growth_incomplete_pct:.1f}%)")
+    
+    # quality_scoreが不完全（roeが欠損）の場合
+    missing_roe = df["roe"].isna()
+    quality_incomplete_pct = (missing_roe.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
+    print(f"  quality_score不完全（roe欠損）: {missing_roe.sum()}/{len(df)} ({quality_incomplete_pct:.1f}%)")
+    
+    # size_scoreが不完全（market_capが欠損）の場合
+    missing_market_cap = df["market_cap"].isna()
+    size_incomplete_pct = (missing_market_cap.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
+    print(f"  size_score不完全（market_cap欠損）: {missing_market_cap.sum()}/{len(df)} ({size_incomplete_pct:.1f}%)")
+    
+    # record_high_scoreが不完全（record_high_forecast_flagが欠損）の場合
+    missing_record_high = df["record_high_forecast_flag"].isna()
+    record_high_incomplete_pct = (missing_record_high.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
+    print(f"  record_high_score不完全（record_high_forecast_flag欠損）: {missing_record_high.sum()}/{len(df)} ({record_high_incomplete_pct:.1f}%)")
+    
+    # core_scoreが不完全（いずれかのサブスコアが不完全）の場合
+    incomplete_core = incomplete_value | incomplete_growth | missing_roe | missing_market_cap | missing_record_high
+    core_incomplete_pct = (incomplete_core.sum() / len(df)) * 100.0 if len(df) > 0 else 0.0
+    print(f"  core_score不完全（いずれかのサブスコアが不完全）: {incomplete_core.sum()}/{len(df)} ({core_incomplete_pct:.1f}%)")
+    
+    # フィルタ後の不完全なスコアの割合
+    if "liquidity_60d" in df.columns and "roe" in df.columns:
+        # 流動性フィルタとROEフィルタを適用
+        after_liquidity = df[df["liquidity_60d"] >= df["liquidity_60d"].quantile(PARAMS.liquidity_quantile_cut)]
+        after_roe = after_liquidity[after_liquidity["roe"] >= PARAMS.roe_min] if len(after_liquidity) > 0 else pd.DataFrame()
+        
+        if len(after_roe) > 0:
+            incomplete_after_filters = (
+                after_roe["forward_per"].isna() | after_roe["pbr"].isna() |
+                after_roe["op_growth"].isna() | after_roe["profit_growth"].isna() |
+                after_roe["market_cap"].isna() | after_roe["record_high_forecast_flag"].isna()
+            )
+            incomplete_after_pct = (incomplete_after_filters.sum() / len(after_roe)) * 100.0 if len(after_roe) > 0 else 0.0
+            print(f"\n  [フィルタ後] 不完全なcore_scoreの割合: {incomplete_after_filters.sum()}/{len(after_roe)} ({incomplete_after_pct:.1f}%)")
+            
+            # プールサイズの銘柄についても確認
+            pool = after_roe.sort_values("core_score", ascending=False).head(PARAMS.pool_size) if len(after_roe) > 0 else pd.DataFrame()
+            if len(pool) > 0:
+                incomplete_pool = (
+                    pool["forward_per"].isna() | pool["pbr"].isna() |
+                    pool["op_growth"].isna() | pool["profit_growth"].isna() |
+                    pool["market_cap"].isna() | pool["record_high_forecast_flag"].isna()
+                )
+                incomplete_pool_pct = (incomplete_pool.sum() / len(pool)) * 100.0 if len(pool) > 0 else 0.0
+                print(f"  [プール] 不完全なcore_scoreの割合: {incomplete_pool.sum()}/{len(pool)} ({incomplete_pool_pct:.1f}%)")
 
     out_cols = [
         "code", "sector33",

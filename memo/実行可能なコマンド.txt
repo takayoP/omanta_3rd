@@ -14,3 +14,27 @@ python -m omanta_3rd.jobs.etl_update --target fins --start 2025-09-01 --end 2025
 
 # 月次実行（特徴量計算 + ポートフォリオ選定）
 python -m omanta_3rd.jobs.monthly_run
+
+# 特定のリバランス日のポートフォリオの損益を確認
+python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19
+
+# 評価日を指定する場合
+python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --as-of-date 2025-12-20
+
+# すべてのポートフォリオの損益を確認
+python -m omanta_3rd.jobs.backtest
+
+# CSV形式で出力
+python -m omanta_3rd.jobs.backtest --format csv --output backtest_results.csv
+
+特定のポートフォリオのパフォーマンスを計算してDBに保存
+python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --save-to-db
+
+すべてのポートフォリオのパフォーマンスを計算してDBに保存
+python -m omanta_3rd.jobs.backtest --save-to-db
+
+評価日を指定して計算
+python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --as-of-date 2025-12-20 --save-to-db
+
+企業コードを入力してAPIから取得し、欠損値を確認するスクリプト
+python check_api_fins.py
