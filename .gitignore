@@ -43,6 +43,7 @@ ENV/
 data/db/*.sqlite
 data/db/*.sqlite-wal
 data/db/*.sqlite-shm
+data/db/archive/
 
 # Logs
 data/logs/*.log
