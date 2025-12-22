@@ -683,6 +683,7 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
             （欠損率を下げるため）
     """
     # まず、銘柄ごとに最新のcurrent_period_endを選ぶ（SQL側で確定）
+    # 重要: current_period_end <= asof の条件を追加（計算日より後の期末日のデータは実績値が入っていないため除外）
     # フィルタリング条件を緩和：主要項目が全て欠損していても取得（後でPython側で補完）
     df_latest_period = pd.read_sql_query(
         """
@@ -695,6 +696,7 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
             ) AS rn
           FROM fins_statements
           WHERE disclosed_date <= ?
+            AND current_period_end <= ?
             AND type_of_current_period = 'FY'
         )
         SELECT code, current_period_end
@@ -702,7 +704,7 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
         WHERE rn = 1
         """,
         conn,
-        params=(asof,),
+        params=(asof, asof),
     )
     
     if df_latest_period.empty:
@@ -711,6 +713,7 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
     # 最新のcurrent_period_endを持つレコードを全て取得（相互補完のため）
     # 同じcurrent_period_endの複数レコードがある場合に備える
     # (code, current_period_end)のペアでJOINすることで、別銘柄の期末日が混ざることを防止
+    # 重要: current_period_end <= asof の条件を追加（計算日より後の期末日のデータは実績値が入っていないため除外）
     # フィルタリング条件を緩和：主要項目が全て欠損していても取得（後でPython側で補完）
     df = pd.read_sql_query(
         """
@@ -726,6 +729,7 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
               ) AS rn
             FROM fins_statements
             WHERE disclosed_date <= ?
+              AND current_period_end <= ?
               AND type_of_current_period = 'FY'
           )
           WHERE rn = 1
@@ -741,10 +745,11 @@ def _load_latest_fy(conn, asof: str) -> pd.DataFrame:
           ON fs.code = l.code
          AND fs.current_period_end = l.current_period_end
         WHERE fs.disclosed_date <= ?
+          AND fs.current_period_end <= ?
           AND fs.type_of_current_period = 'FY'
         """,
         conn,
-        params=(asof, asof),
+        params=(asof, asof, asof, asof),
     )
     if df.empty:
         return pd.DataFrame()
@@ -879,6 +884,8 @@ def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
     各current_period_endごとに開示日が最新のものを選ぶ
     主要項目（operating_profit, profit, equity）が全て欠損のレコードは除外
     
+    重要: current_period_end <= asof の条件を追加（計算日より後の期末日のデータは実績値が入っていないため除外）
+    
     注意: 欠損値は四半期データで補完しない（会計基準変更などで古い開示日のデータが
           NULLに書き換えられている可能性があるため）
     """
@@ -889,11 +896,12 @@ def _load_fy_history(conn, asof: str, years: int = 10) -> pd.DataFrame:
                shares_outstanding, treasury_shares
         FROM fins_statements
         WHERE disclosed_date <= ?
+          AND current_period_end <= ?
           AND type_of_current_period = 'FY'
           AND (operating_profit IS NOT NULL OR profit IS NOT NULL OR equity IS NOT NULL)
         """,
         conn,
-        params=(asof,),
+        params=(asof, asof),
     )
     if df.empty:
         return df
@@ -977,6 +985,7 @@ def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
           この関数は主に四半期データから予想を取得する場合に使用される
     """
     # まずFYデータを取得（開示日が最新のもの）
+    # 重要: current_period_end <= asof の条件を追加（計算日より後の期末日のデータは実績値が入っていないため除外）
     df_fy = pd.read_sql_query(
         """
         WITH ranked AS (
@@ -990,6 +999,7 @@ def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
             ) AS rn
           FROM fins_statements
           WHERE disclosed_date <= ?
+            AND current_period_end <= ?
             AND type_of_current_period = 'FY'
             AND (forecast_operating_profit IS NOT NULL 
                  OR forecast_profit IS NOT NULL 
@@ -1002,7 +1012,7 @@ def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
         WHERE rn = 1
         """,
         conn,
-        params=(asof,),
+        params=(asof, asof),
     )
     
     # FYデータに予想値がある銘柄のリスト

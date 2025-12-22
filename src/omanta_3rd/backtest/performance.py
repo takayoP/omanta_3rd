@@ -45,11 +45,17 @@ def calculate_portfolio_performance(
         
         # 評価日を決定
         if as_of_date is None:
-            latest_date = pd.read_sql_query(
+            latest_date_df = pd.read_sql_query(
                 "SELECT MAX(date) as max_date FROM prices_daily",
                 conn
-            )["max_date"].iloc[0]
-            as_of_date = latest_date
+            )
+            if latest_date_df.empty or pd.isna(latest_date_df["max_date"].iloc[0]):
+                return {
+                    "rebalance_date": rebalance_date,
+                    "as_of_date": None,
+                    "error": "価格データが見つかりません",
+                }
+            as_of_date = latest_date_df["max_date"].iloc[0]
         
         # 各銘柄のリバランス日時点の価格を取得
         rebalance_prices = []
@@ -188,16 +194,20 @@ def save_performance_to_db(
         
         # 銘柄別のパフォーマンスを保存
         stock_rows = []
-        for stock in performance.get("stocks", []):
-            stock_rows.append({
-                "rebalance_date": performance["rebalance_date"],
-                "as_of_date": performance["as_of_date"],
-                "code": stock["code"],
-                "weight": stock["weight"],
-                "rebalance_price": stock.get("rebalance_price"),
-                "current_price": stock.get("current_price"),
-                "return_pct": stock.get("return_pct"),
-            })
+        stocks = performance.get("stocks", [])
+        if stocks:
+            for stock in stocks:
+                # codeが存在することを確認
+                if "code" in stock:
+                    stock_rows.append({
+                        "rebalance_date": performance["rebalance_date"],
+                        "as_of_date": performance["as_of_date"],
+                        "code": stock["code"],
+                        "weight": stock.get("weight"),
+                        "rebalance_price": stock.get("rebalance_price"),
+                        "current_price": stock.get("current_price"),
+                        "return_pct": stock.get("return_pct"),
+                    })
         
         if stock_rows:
             upsert(
