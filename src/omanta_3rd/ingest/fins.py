@@ -145,18 +145,99 @@ def fetch_financial_statements(
     return rows
 
 
+def _merge_duplicate_records(mapped_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    同じ主キーを持つレコードが複数ある場合、実績値があるレコードを優先してマージする
+    
+    同じ主キー（disclosed_date, code, type_of_current_period, current_period_end）で
+    複数のレコードがある場合、実績値（operating_profit, profit, equity等）があるレコードを優先し、
+    不足している項目を他のレコードから補完する
+    """
+    if not mapped_rows:
+        return []
+    
+    # 主キーでグループ化
+    grouped: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in mapped_rows:
+        key = (
+            row.get("disclosed_date"),
+            row.get("code"),
+            row.get("type_of_current_period"),
+            row.get("current_period_end"),
+        )
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(row)
+    
+    merged = []
+    for key, rows in grouped.items():
+        if len(rows) == 1:
+            # 1件のみの場合はそのまま
+            merged.append(rows[0])
+        else:
+            # 複数ある場合は、実績値があるレコードを優先
+            # 実績値の有無でソート（実績値があるものを優先）
+            def _has_actuals(row):
+                return (
+                    row.get("operating_profit") is not None or
+                    row.get("profit") is not None or
+                    row.get("equity") is not None or
+                    row.get("eps") is not None or
+                    row.get("bvps") is not None
+                )
+            
+            rows_sorted = sorted(rows, key=_has_actuals, reverse=True)
+            base_row = rows_sorted[0].copy()
+            
+            # 他のレコードから不足している項目を補完
+            for other_row in rows_sorted[1:]:
+                # 実績値の補完
+                if base_row.get("operating_profit") is None and other_row.get("operating_profit") is not None:
+                    base_row["operating_profit"] = other_row["operating_profit"]
+                if base_row.get("profit") is None and other_row.get("profit") is not None:
+                    base_row["profit"] = other_row["profit"]
+                if base_row.get("equity") is None and other_row.get("equity") is not None:
+                    base_row["equity"] = other_row["equity"]
+                if base_row.get("eps") is None and other_row.get("eps") is not None:
+                    base_row["eps"] = other_row["eps"]
+                if base_row.get("bvps") is None and other_row.get("bvps") is not None:
+                    base_row["bvps"] = other_row["bvps"]
+                
+                # 予想値の補完
+                if base_row.get("forecast_operating_profit") is None and other_row.get("forecast_operating_profit") is not None:
+                    base_row["forecast_operating_profit"] = other_row["forecast_operating_profit"]
+                if base_row.get("forecast_profit") is None and other_row.get("forecast_profit") is not None:
+                    base_row["forecast_profit"] = other_row["forecast_profit"]
+                if base_row.get("forecast_eps") is None and other_row.get("forecast_eps") is not None:
+                    base_row["forecast_eps"] = other_row["forecast_eps"]
+                
+                # その他の項目の補完
+                if base_row.get("shares_outstanding") is None and other_row.get("shares_outstanding") is not None:
+                    base_row["shares_outstanding"] = other_row["shares_outstanding"]
+                if base_row.get("treasury_shares") is None and other_row.get("treasury_shares") is not None:
+                    base_row["treasury_shares"] = other_row["treasury_shares"]
+            
+            merged.append(base_row)
+    
+    return merged
+
+
 def save_financial_statements(mapped_rows: List[Dict[str, Any]]):
     """
     DBに保存（UPSERT）
+    同じ主キーを持つレコードが複数ある場合、マージしてから保存
     """
     if not mapped_rows:
         return
+
+    # 同じ主キーを持つレコードをマージ
+    merged_rows = _merge_duplicate_records(mapped_rows)
 
     with connect_db() as conn:
         upsert(
             conn,
             "fins_statements",
-            mapped_rows,
+            merged_rows,
             conflict_columns=[
                 "disclosed_date",
                 "code",

@@ -23,12 +23,16 @@ CREATE TABLE IF NOT EXISTS prices_daily (
   date TEXT NOT NULL,
   -- YYYY-MM-DD
   code TEXT NOT NULL,
+  close REAL,
+  -- 調整前終値
   adj_close REAL,
   -- 調整済終値
   adj_volume REAL,
   -- 調整済出来高
   turnover_value REAL,
   -- 売買代金
+  adjustment_factor REAL,
+  -- 調整係数（株式分割等の調整係数、1:2分割なら0.5）
   PRIMARY KEY (date, code)
 );
 -- -----------------------

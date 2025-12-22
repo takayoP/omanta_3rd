@@ -15,6 +15,9 @@ python -m omanta_3rd.jobs.etl_update --target fins --start 2025-09-01 --end 2025
 # 月次実行（特徴量計算 + ポートフォリオ選定）
 python -m omanta_3rd.jobs.monthly_run
 
+# 特定の日付で実行
+$env:PYTHONPATH="c:\Users\takay\Dropbox\Tama_code\omanta_3rd\src"; python -m omanta_3rd.jobs.monthly_run --asof 2025-12-19
+
 # 特定のリバランス日のポートフォリオの損益を確認
 python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19
 

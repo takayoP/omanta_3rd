@@ -52,14 +52,32 @@ def fetch_prices_by_date(client: JQuantsClient, date: str) -> List[Dict[str, Any
 def _map_price_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """
     APIの1行をDBスキーマに合わせて変換
+    
+    J-Quants APIの/prices/daily_quotesエンドポイントから取得できるフィールド:
+    - Close: 終値（調整前）
+    - AdjustmentClose: 調整済終値
+    - AdjustmentFactor: 調整係数
+    - AdjustmentVolume: 調整済出来高
+    - TurnoverValue: 売買代金
     """
     code = _normalize_code(row.get("Code"))
+    
+    # Closeフィールドを取得（調整前終値）
+    close = row.get("Close")
+    # CloseがNoneの場合は、AdjustmentCloseを使用（フォールバック）
+    # ただし、通常はCloseが提供されるはず
+    # 注意: CloseとAdjustmentCloseの両方がNoneの場合は、その日が休場日や取引がなかった可能性がある
+    if close is None:
+        close = row.get("AdjustmentClose")
+    
     return {
         "date": row.get("Date"),
         "code": code,
-        "adj_close": row.get("AdjustmentClose"),
-        "adj_volume": row.get("AdjustmentVolume"),
-        "turnover_value": row.get("TurnoverValue"),
+        "close": close,  # 調整前終値（Closeフィールドから取得）
+        "adj_close": row.get("AdjustmentClose"),  # 調整済終値
+        "adj_volume": row.get("AdjustmentVolume"),  # 調整済出来高
+        "turnover_value": row.get("TurnoverValue"),  # 売買代金
+        "adjustment_factor": row.get("AdjustmentFactor"),  # 調整係数
     }
 
 
