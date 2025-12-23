@@ -524,4 +524,3 @@ python -m omanta_3rd.jobs.backtest --rebalance-date 2025-01-01 --as-of-date 2025
 
 **最終更新日**: 2025-01-XX
 **バージョン**: 1.0
-

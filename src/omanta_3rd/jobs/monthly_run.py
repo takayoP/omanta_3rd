@@ -143,11 +143,13 @@ def _entry_score(close: pd.Series) -> float:
         rsi_score = np.nan
 
         if not pd.isna(z):
-            # さらに緩やかな閾値: z=-0.5 => 0, z=-3 => 1 (以前は z=-2 => 0, z=-4 => 1)
-            bb_score = _clip01((-0.5 - z) / 2.5)
+            # z=-3のとき1、z=0のとき0になる線形変換（クリップなし）
+            # 計算式: (z - 0) / (-3 - 0) = -z / 3
+            bb_score = -z / 3.0
         if not pd.isna(rsi):
-            # さらに緩やかな閾値: rsi=40 => 0, rsi=0 => 1 (以前は rsi=30 => 0, rsi=0 => 1)
-            rsi_score = _clip01((40.0 - rsi) / 40.0)
+            # RSI=20のとき1、RSI=50のとき0になる線形変換（クリップなし）
+            # 計算式: (RSI - 50) / (20 - 50) = (50 - RSI) / 30
+            rsi_score = (50.0 - rsi) / 30.0
 
         if not pd.isna(bb_score) and not pd.isna(rsi_score):
             scores.append(0.5 * bb_score + 0.5 * rsi_score)
@@ -1521,6 +1523,7 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     df["value_score"] = PARAMS.w_forward_per * (1.0 - df["forward_per_pct"]) + PARAMS.w_pbr * (1.0 - df["pbr_pct"])
 
     # Size score
+    # 大きいほど高スコア（時価総額が大きい銘柄を好む）
     df["log_mcap"] = df["market_cap"].apply(_log_safe)
     df["size_score"] = _pct_rank(df["log_mcap"], ascending=True)
 
