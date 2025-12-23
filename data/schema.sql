@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS prices_daily (
   date TEXT NOT NULL,
   -- YYYY-MM-DD
   code TEXT NOT NULL,
+  open REAL,
+  -- 始値（調整前）
   close REAL,
   -- 調整前終値
   adj_close REAL,

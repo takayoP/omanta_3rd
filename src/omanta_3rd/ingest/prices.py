@@ -54,6 +54,7 @@ def _map_price_row(row: Dict[str, Any]) -> Dict[str, Any]:
     APIの1行をDBスキーマに合わせて変換
     
     J-Quants APIの/prices/daily_quotesエンドポイントから取得できるフィールド:
+    - Open: 始値（調整前）
     - Close: 終値（調整前）
     - AdjustmentClose: 調整済終値
     - AdjustmentFactor: 調整係数
@@ -73,6 +74,7 @@ def _map_price_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "date": row.get("Date"),
         "code": code,
+        "open": row.get("Open"),  # 始値（調整前）
         "close": close,  # 調整前終値（Closeフィールドから取得）
         "adj_close": row.get("AdjustmentClose"),  # 調整済終値
         "adj_volume": row.get("AdjustmentVolume"),  # 調整済出来高
