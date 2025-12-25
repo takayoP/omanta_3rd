@@ -12,7 +12,20 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 # データベース設定
-DB_PATH = Path(os.getenv("DB_PATH", PROJECT_ROOT / "data" / "db" / "jquants.sqlite"))
+_db_path_env = os.getenv("DB_PATH")
+if _db_path_env:
+    DB_PATH = Path(_db_path_env)
+else:
+    # 開発環境用のデフォルトパス
+    # 本番環境では環境変数 DB_PATH の設定を推奨
+    import warnings
+    default_path = PROJECT_ROOT / "data" / "db" / "jquants.sqlite"
+    warnings.warn(
+        f"環境変数 DB_PATH が設定されていません。デフォルトパスを使用します: {default_path}",
+        UserWarning,
+        stacklevel=2
+    )
+    DB_PATH = default_path
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # J-Quants API設定

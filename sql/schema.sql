@@ -157,9 +157,13 @@ CREATE TABLE IF NOT EXISTS backtest_stock_performance (
   code TEXT NOT NULL,
   weight REAL NOT NULL,
   rebalance_price REAL,
-  -- リバランス日時点の価格
+  -- リバランス日の翌営業日の始値（購入価格）
   current_price REAL,
-  -- 評価日時点の価格
+  -- 評価日時点の終値（評価価格）
+  split_multiplier REAL,
+  -- リバランス日の翌営業日以降の分割倍率
+  adjusted_current_price REAL,
+  -- 分割を考慮した調整済み評価価格（current_price * split_multiplier）
   return_pct REAL,
   -- リターン（%）
   PRIMARY KEY (rebalance_date, as_of_date, code)
