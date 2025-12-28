@@ -9,6 +9,7 @@ import pandas as pd
 
 from ..infra.db import connect_db, upsert
 from ..ingest.indices import TOPIX_CODE
+from ..backtest.performance import _split_multiplier_between
 
 
 def add_holding(
@@ -168,16 +169,40 @@ def update_holding_performance(
             # 購入価格はユーザーが入力したpurchase_priceを使用（手打ち入力値）
             actual_purchase_price = float(purchase_price)
             
-            # リターンと損益を計算
+            # 株式分割・併合を考慮した保有株数を計算
+            # 購入日から評価日までの分割倍率を計算
+            # 注意: 購入日当日の分割は考慮しない（購入日の翌営業日以降の分割を考慮）
+            # 購入日の翌営業日を取得
+            next_trading_day_df = pd.read_sql_query(
+                """
+                SELECT MIN(date) AS next_date
+                FROM prices_daily
+                WHERE code = ? AND date > ?
+                """,
+                conn,
+                params=(code, purchase_date),
+            )
+            if not next_trading_day_df.empty and pd.notna(next_trading_day_df["next_date"].iloc[0]):
+                next_trading_day = str(next_trading_day_df["next_date"].iloc[0])
+                # 購入日の翌営業日から評価日までの分割倍率を計算
+                split_mult = _split_multiplier_between(conn, code, next_trading_day, eval_date)
+            else:
+                # 翌営業日が見つからない場合は分割なし
+                split_mult = 1.0
+            
+            # 分割を考慮した保有株数（実際の保有株数）
+            adjusted_shares = shares * split_mult
+            
+            # リターンと損益を計算（分割を考慮した保有株数を使用）
             return_pct = (current_price - actual_purchase_price) / actual_purchase_price * 100.0
             
             if sell_date:
-                # 売却済み：実現損益
-                realized_pnl = (current_price - actual_purchase_price) * shares
+                # 売却済み：実現損益（分割後の実際の保有株数で計算）
+                realized_pnl = (current_price - actual_purchase_price) * adjusted_shares
                 unrealized_pnl = None
             else:
-                # 保有中：含み損益
-                unrealized_pnl = (current_price - actual_purchase_price) * shares
+                # 保有中：含み損益（分割後の実際の保有株数で計算）
+                unrealized_pnl = (current_price - actual_purchase_price) * adjusted_shares
                 realized_pnl = None
             
             # TOPIXのパフォーマンスを取得（購入日の始値を使用）
@@ -194,6 +219,7 @@ def update_holding_performance(
             updated_holding = {
                 "id": int(holding["id"]),
                 "current_price": current_price,
+                "adjustment_factor": split_mult,  # 分割倍率を保存
                 "unrealized_pnl": unrealized_pnl,
                 "return_pct": return_pct,
                 "realized_pnl": realized_pnl,
@@ -219,6 +245,7 @@ def update_holding_performance(
                     """
                     UPDATE holdings
                     SET current_price = ?,
+                        adjustment_factor = ?,
                         unrealized_pnl = ?,
                         return_pct = ?,
                         sell_date = COALESCE(?, sell_date),
@@ -232,6 +259,7 @@ def update_holding_performance(
                     """,
                     (
                         holding.get("current_price"),
+                        holding.get("adjustment_factor"),
                         holding.get("unrealized_pnl"),
                         holding.get("return_pct"),
                         holding.get("sell_date"),

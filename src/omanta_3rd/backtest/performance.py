@@ -232,7 +232,12 @@ def calculate_portfolio_performance(
         portfolio["split_multiplier"] = portfolio["split_multiplier"].fillna(1.0)
         
         # 損益率を計算（分割を考慮）
-        # 分割が発生した場合、現在価格に分割倍率を掛けて調整
+        # バックテストでは仮想的な保有なので、価格を調整する方法を使用
+        # 分割が発生した場合、購入価格を分割後の基準に調整して比較
+        # 例: 1:3分割の場合、購入価格1000円 → 調整後購入価格333.33円
+        #     現在価格400円 → リターン = (400 - 333.33) / 333.33 * 100 = 20%
+        # 
+        # 注意: 実際の保有銘柄では、株数を調整する方法を使用（holdings.pyを参照）
         portfolio["adjusted_current_price"] = portfolio["current_price"] * portfolio["split_multiplier"]
         portfolio["return_pct"] = (
             (portfolio["adjusted_current_price"] - portfolio["rebalance_price"]) 

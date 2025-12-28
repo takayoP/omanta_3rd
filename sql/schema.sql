@@ -197,6 +197,10 @@ CREATE TABLE IF NOT EXISTS holdings (
   -- 証券会社名（例: "SBI証券", "大和証券"）
   current_price REAL,
   -- 現在価格（最新の終値、更新時に計算）
+  adjustment_factor REAL,
+  -- 調整係数（株式分割・併合による株数倍率、購入日から評価日までの分割倍率）
+  -- 例: 1:3分割の場合、adjustment_factor = 3.0
+  -- 購入日から評価日までの分割倍率 = ∏(1 / prices_daily.adjustment_factor)
   unrealized_pnl REAL,
   -- 含み損益（保有中の場合、更新時に計算）
   return_pct REAL,

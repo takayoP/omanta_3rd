@@ -74,15 +74,16 @@ with connect_db() as conn:
             missing_analysis.append(missing_info)
     
     print(f"欠損値がある銘柄数: {len(missing_analysis)}")
+    print(f"詳細分析対象: 上位10銘柄")
     print()
     
     if missing_analysis:
         print("=" * 80)
-        print("欠損値がある銘柄の詳細分析")
+        print("欠損値がある銘柄の詳細分析（上位10銘柄）")
         print("=" * 80)
         
-        # 各銘柄について、FYデータを確認
-        for info in missing_analysis:
+        # 各銘柄について、FYデータを確認（上位10銘柄に制限）
+        for info in missing_analysis[:10]:
             code = info["code"]
             print(f"\n銘柄コード: {code} ({info['company_name']})")
             print("-" * 80)

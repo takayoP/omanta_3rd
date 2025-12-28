@@ -1827,6 +1827,7 @@ def save_portfolio(conn, pf: pd.DataFrame):
 
     rows = pf.to_dict("records")
     upsert(conn, "portfolio_monthly", rows, conflict_columns=["rebalance_date", "code"])
+    conn.commit()  # upsert後にコミットを追加
 
 
 # -----------------------------

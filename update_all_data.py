@@ -292,13 +292,21 @@ def main(
         try:
             from src.omanta_3rd.portfolio.holdings import update_holding_performance, update_holdings_summary
             
+            print("=" * 80)
+            print("【保有銘柄のパフォーマンス更新】")
+            print("=" * 80)
+            print("保有銘柄のパフォーマンス、adjustment_factor（株式分割倍率）、TOPIX比較を更新中...")
+            
             update_holding_performance()
             update_holdings_summary()
             results["holdings"] = True
-            print("✅ 保有銘柄のパフォーマンスを更新しました")
+            print("✅ 保有銘柄のパフォーマンスを更新しました（adjustment_factor含む）")
+            print("=" * 80)
             print()
         except Exception as e:
             print(f"❌ 保有銘柄のパフォーマンス更新中にエラーが発生しました: {e}")
+            import traceback
+            traceback.print_exc()
             results["holdings"] = False
             print()
     
