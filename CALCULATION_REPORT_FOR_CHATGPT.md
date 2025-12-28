@@ -429,3 +429,9 @@ Forward PER = 2,714.00 / 190.99 = 14.21
 - **財務データ**: `fins_statements`テーブル（J-Quants API）
 - **計算ロジック**: `src/omanta_3rd/jobs/monthly_run.py`の`build_features`関数
 - **仕様書**: `CALCULATION_LOGIC_STANDARD.md`
+
+
+
+
+
+

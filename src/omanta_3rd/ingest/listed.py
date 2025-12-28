@@ -24,9 +24,12 @@ def _normalize_code(code: Any) -> str:
 
 def fetch_listed_info(client: JQuantsClient, date: str) -> List[Dict[str, Any]]:
     """
-    /listed/info から銘柄情報を取得し、DBスキーマに合わせて変換して返す
+    /v2/equities/master から銘柄情報を取得し、DBスキーマに合わせて変換して返す
+    
+    V2 APIのカラム名:
+    - Date, Code, CoName, MktNm, S17Nm, S33Nm
     """
-    rows = client.get_all_pages("/listed/info", params={"date": date})
+    rows = client.get_all_pages("/equities/master", params={"date": date})
 
     result: List[Dict[str, Any]] = []
     for item in rows:
@@ -35,10 +38,10 @@ def fetch_listed_info(client: JQuantsClient, date: str) -> List[Dict[str, Any]]:
                 # API側にもDateがあるが、引数dateを優先してもOK
                 "date": item.get("Date") or date,
                 "code": _normalize_code(item.get("Code")),
-                "company_name": item.get("CompanyName") or "",
-                "market_name": item.get("MarketCodeName") or "",
-                "sector17": item.get("Sector17CodeName") or "",
-                "sector33": item.get("Sector33CodeName") or "",
+                "company_name": item.get("CoName") or "",
+                "market_name": item.get("MktNm") or "",
+                "sector17": item.get("S17Nm") or "",
+                "sector33": item.get("S33Nm") or "",
             }
         )
 

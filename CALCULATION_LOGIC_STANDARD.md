@@ -336,3 +336,8 @@ def _safe_div(numerator, denominator):
 2. **EPS/BPS/予想EPSを自前で計算**: `profit/equity/forecast_profit`と補正後株数から再計算
 3. **分割・併合を株数側で補正**: FY期末→評価日までの分割倍率を計算して株数を補正
 4. **標準的な定義**: 四季報等の一般的な指標と一致しやすい
+
+
+
+
+

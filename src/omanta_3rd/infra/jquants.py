@@ -4,9 +4,7 @@ from typing import Optional, Dict, Any, List
 from functools import wraps
 
 from ..config.settings import (
-    JQUANTS_REFRESH_TOKEN,
-    JQUANTS_MAILADDRESS,
-    JQUANTS_PASSWORD,
+    JQUANTS_API_KEY,
     JQUANTS_API_BASE_URL,
 )
 
@@ -37,54 +35,34 @@ def retry(max_attempts: int = 3, delay: float = 1.0):
 class JQuantsClient:
     def __init__(
         self,
-        refresh_token: Optional[str] = None,
-        mailaddress: Optional[str] = None,
-        password: Optional[str] = None,
+        api_key: Optional[str] = None,
+        requests_per_minute: int = 120,
     ):
-        self.refresh_token = refresh_token or JQUANTS_REFRESH_TOKEN
-        self.mailaddress = mailaddress or JQUANTS_MAILADDRESS
-        self.password = password or JQUANTS_PASSWORD
+        """
+        J-Quants API V2 クライアント
+        
+        Args:
+            api_key: APIキー（未指定の場合は環境変数JQUANTS_API_KEYを使用）
+            requests_per_minute: 1分あたりのリクエスト制限（デフォルト: 120）
+        """
+        self.api_key = api_key or JQUANTS_API_KEY
+        if not self.api_key:
+            raise ValueError("APIキーが必要です。環境変数JQUANTS_API_KEYを設定するか、api_key引数を指定してください。")
+        
+        # レート制限管理: 120リクエスト/分 = 0.5秒/リクエスト（60秒 / 120リクエスト）
+        self.min_request_interval = 60.0 / requests_per_minute
+        self.last_request_time: float = 0.0
 
-        self.id_token: Optional[str] = None
-        self.id_token_expires_at: float = 0.0  # 自前で管理（24h想定）:contentReference[oaicite:6]{index=6}
-
-        # refresh token が無いなら、mail/pass が必要 :contentReference[oaicite:7]{index=7}
-        if not self.refresh_token and not (self.mailaddress and self.password):
-            raise ValueError("refresh token か mailaddress/password が必要です")
-
-    def _issue_refresh_token(self) -> str:
-        """mail/password から refreshToken を取得"""
-        url = f"{JQUANTS_API_BASE_URL}/token/auth_user"
-        payload = {"mailaddress": self.mailaddress, "password": self.password}
-        r = requests.post(url, json=payload, timeout=30)
-        r.raise_for_status()
-        j = r.json()
-        token = j.get("refreshToken")
-        if not token:
-            raise JQuantsAPIError(f"refreshTokenが取得できません: keys={list(j.keys())}")
-        self.refresh_token = token
-        return token
-
-    def _issue_id_token(self) -> str:
-        # A運用：毎回 refreshToken を取り直す（1週間失効対策）
-        self._issue_refresh_token()
-        url = f"{JQUANTS_API_BASE_URL}/token/auth_refresh"
-        r = requests.post(url, params={"refreshtoken": self.refresh_token}, timeout=30)
-        r.raise_for_status()
-        j = r.json()
-        token = j.get("idToken")
-        if not token:
-            raise JQuantsAPIError(f"idTokenが取得できません: keys={list(j.keys())}")
-
-        self.id_token = token
-        # idTokenは24時間（公式）。安全側に23時間で更新する :contentReference[oaicite:9]{index=9}
-        self.id_token_expires_at = time.time() + 23 * 60 * 60
-        return token
-
-    def _get_id_token(self) -> str:
-        if self.id_token and time.time() < self.id_token_expires_at:
-            return self.id_token
-        return self._issue_id_token()
+    def _wait_for_rate_limit(self):
+        """レート制限を守るために必要な待機時間を確保"""
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+        
+        if elapsed < self.min_request_interval:
+            sleep_time = self.min_request_interval - elapsed
+            time.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
 
     @retry(max_attempts=3, delay=1.0)
     def get(
@@ -93,22 +71,29 @@ class JQuantsClient:
         params: Optional[Dict[str, Any]] = None,
         pagination_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        id_token = self._get_id_token()
+        """
+        GETリクエストを実行（V2 API）
+        
+        Args:
+            endpoint: APIエンドポイント（例: "/equities/master"）
+            params: クエリパラメータ
+            pagination_key: ページネーションキー
+            
+        Returns:
+            APIレスポンス（JSON）
+        """
+        # レート制限を守るために待機
+        self._wait_for_rate_limit()
+        
         url = f"{JQUANTS_API_BASE_URL}{endpoint}"
 
         q = dict(params or {})
         if pagination_key:
             q["pagination_key"] = pagination_key
 
-        headers = {"Authorization": f"Bearer {id_token}"}  # これだけ :contentReference[oaicite:10]{index=10}
+        # V2 APIではAPIキーをx-api-keyヘッダーで送信
+        headers = {"x-api-key": self.api_key}
         r = requests.get(url, headers=headers, params=q, timeout=60)
-
-        # 401なら idToken 再発行して1回だけリトライ
-        if r.status_code == 401:
-            self.id_token = None
-            id_token = self._issue_id_token()
-            headers = {"Authorization": f"Bearer {id_token}"}
-            r = requests.get(url, headers=headers, params=q, timeout=60)
 
         if r.status_code == 429:
             # レート制限：少し待ってから例外にしてretryデコレータに渡す
@@ -134,7 +119,7 @@ class JQuantsClient:
     ) -> List[Dict[str, Any]]:
         """
         pagination_key があるAPIに対応。
-        /listed/info はレスポンスキーが "info" :contentReference[oaicite:11]{index=11}
+        V2 APIではレスポンスキーが "data" に統一されている
         """
         all_rows: List[Dict[str, Any]] = []
         pagination_key = None
@@ -142,25 +127,30 @@ class JQuantsClient:
         while True:
             j = self.get(endpoint, params=params, pagination_key=pagination_key)
 
-            # エンドポイントごとの配列キーを自動検出（pagination_key/message以外の最初のlist）
-            list_key = None
-            for k, v in j.items():
-                if k in ("pagination_key", "message"):
-                    continue
-                if isinstance(v, list):
-                    list_key = k
-                    break
-
-            if list_key:
-                all_rows.extend(j[list_key])
+            # V2 APIでは"data"キーで統一されている
+            if "data" in j and isinstance(j["data"], list):
+                all_rows.extend(j["data"])
             else:
-                # 予期しない場合は丸ごと
-                all_rows.append(j)
+                # フォールバック: エンドポイントごとの配列キーを自動検出
+                list_key = None
+                for k, v in j.items():
+                    if k in ("pagination_key", "message"):
+                        continue
+                    if isinstance(v, list):
+                        list_key = k
+                        break
+                
+                if list_key:
+                    all_rows.extend(j[list_key])
+                else:
+                    # 予期しない場合は丸ごと
+                    all_rows.append(j)
 
             pagination_key = j.get("pagination_key")
             if not pagination_key:
                 break
 
-            time.sleep(0.3)
+            # ページネーション時もレート制限管理により適切な間隔が保たれるため、
+            # 追加の待機は不要（get()内で既に待機済み）
 
         return all_rows

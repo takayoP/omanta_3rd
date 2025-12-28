@@ -54,8 +54,13 @@ def run_migration(migration_file: Path):
                 print(f"  ✓ 実行完了")
             except sqlite3.OperationalError as e:
                 error_msg = str(e).lower()
-                # カラムが既に存在する場合などはスキップ
-                if "duplicate column name" in error_msg or "already exists" in error_msg:
+                # テーブル/カラム/インデックスが既に存在する場合などはスキップ
+                if (
+                    "duplicate column name" in error_msg 
+                    or "already exists" in error_msg 
+                    or "table" in error_msg and "already exists" in error_msg
+                    or "index" in error_msg and "already exists" in error_msg
+                ):
                     print(f"  - スキップ（既に存在）")
                 else:
                     print(f"  ✗ エラー: {e}")

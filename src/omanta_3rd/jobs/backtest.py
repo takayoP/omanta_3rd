@@ -42,14 +42,19 @@ def main(
         if output_format == "json":
             output = json.dumps(perf, indent=2, ensure_ascii=False)
         else:
-            # CSV形式（簡易版）
-            output = f"リバランス日,評価日,総リターン(%),銘柄数,平均リターン(%),最小リターン(%),最大リターン(%)\n"
+            # CSV形式（TOPIX比較を含む）
+            topix_comp = perf.get("topix_comparison", {})
+            total_ret = f"{perf['total_return_pct']:.2f}" if perf.get('total_return_pct') is not None else 'N/A'
+            topix_ret = f"{topix_comp.get('topix_return_pct'):.2f}" if topix_comp.get('topix_return_pct') is not None else 'N/A'
+            excess_ret = f"{topix_comp.get('excess_return_pct'):.2f}" if topix_comp.get('excess_return_pct') is not None else 'N/A'
+            avg_ret = f"{perf['avg_return_pct']:.2f}" if perf.get('avg_return_pct') is not None else 'N/A'
+            min_ret = f"{perf['min_return_pct']:.2f}" if perf.get('min_return_pct') is not None else 'N/A'
+            max_ret = f"{perf['max_return_pct']:.2f}" if perf.get('max_return_pct') is not None else 'N/A'
+            output = f"リバランス日,評価日,総リターン(%),TOPIXリターン(%),超過リターン(%),銘柄数,平均リターン(%),最小リターン(%),最大リターン(%)\n"
             output += f"{perf['rebalance_date']},{perf['as_of_date']},"
-            output += f"{perf['total_return_pct']:.2f if perf['total_return_pct'] else 'N/A'},"
+            output += f"{total_ret},{topix_ret},{excess_ret},"
             output += f"{perf['num_stocks']},"
-            output += f"{perf['avg_return_pct']:.2f if perf['avg_return_pct'] else 'N/A'},"
-            output += f"{perf['min_return_pct']:.2f if perf['min_return_pct'] else 'N/A'},"
-            output += f"{perf['max_return_pct']:.2f if perf['max_return_pct'] else 'N/A'}\n"
+            output += f"{avg_ret},{min_ret},{max_ret}\n"
         
         if save_to_db:
             save_performance_to_db(perf)
@@ -67,16 +72,21 @@ def main(
         if output_format == "json":
             output = json.dumps(results, indent=2, ensure_ascii=False)
         else:
-            # CSV形式
-            output = "リバランス日,評価日,総リターン(%),銘柄数,平均リターン(%),最小リターン(%),最大リターン(%)\n"
+            # CSV形式（TOPIX比較を含む）
+            output = "リバランス日,評価日,総リターン(%),TOPIXリターン(%),超過リターン(%),銘柄数,平均リターン(%),最小リターン(%),最大リターン(%)\n"
             for perf in results:
                 if "error" not in perf:
+                    topix_comp = perf.get("topix_comparison", {})
+                    total_ret = f"{perf['total_return_pct']:.2f}" if perf.get('total_return_pct') is not None else 'N/A'
+                    topix_ret = f"{topix_comp.get('topix_return_pct'):.2f}" if topix_comp.get('topix_return_pct') is not None else 'N/A'
+                    excess_ret = f"{topix_comp.get('excess_return_pct'):.2f}" if topix_comp.get('excess_return_pct') is not None else 'N/A'
+                    avg_ret = f"{perf['avg_return_pct']:.2f}" if perf.get('avg_return_pct') is not None else 'N/A'
+                    min_ret = f"{perf['min_return_pct']:.2f}" if perf.get('min_return_pct') is not None else 'N/A'
+                    max_ret = f"{perf['max_return_pct']:.2f}" if perf.get('max_return_pct') is not None else 'N/A'
                     output += f"{perf['rebalance_date']},{perf['as_of_date']},"
-                    output += f"{perf['total_return_pct']:.2f if perf['total_return_pct'] else 'N/A'},"
+                    output += f"{total_ret},{topix_ret},{excess_ret},"
                     output += f"{perf['num_stocks']},"
-                    output += f"{perf['avg_return_pct']:.2f if perf['avg_return_pct'] else 'N/A'},"
-                    output += f"{perf['min_return_pct']:.2f if perf['min_return_pct'] else 'N/A'},"
-                    output += f"{perf['max_return_pct']:.2f if perf['max_return_pct'] else 'N/A'}\n"
+                    output += f"{avg_ret},{min_ret},{max_ret}\n"
         
         if save_to_db:
             for perf in results:

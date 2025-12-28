@@ -6,3 +6,8 @@
 -- カラムが既に存在する場合はエラーになるが、マイグレーションスクリプトでエラーハンドリングする
 ALTER TABLE prices_daily
 ADD COLUMN adjustment_factor REAL;
+
+
+
+
+

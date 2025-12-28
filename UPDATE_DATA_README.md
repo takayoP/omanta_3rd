@@ -191,3 +191,9 @@ python update_all_data.py --start 2024-01-01 --end 2024-12-31
 - `src/omanta_3rd/ingest/prices.py` - 価格データの取り込みロジック
 - `src/omanta_3rd/ingest/fins.py` - 財務データの取り込みロジック
 - `src/omanta_3rd/jobs/etl_update.py` - 既存のETL更新ジョブ（参考）
+
+
+
+
+
+

@@ -8,3 +8,9 @@ ADD COLUMN split_multiplier REAL;
 ALTER TABLE backtest_stock_performance
 ADD COLUMN adjusted_current_price REAL;
 
+
+
+
+
+
+

@@ -144,6 +144,10 @@ CREATE TABLE IF NOT EXISTS backtest_performance (
   -- 最小リターン（%）
   max_return_pct REAL,
   -- 最大リターン（%）
+  topix_return_pct REAL,
+  -- TOPIXリターン（%）
+  excess_return_pct REAL,
+  -- 超過リターン（%）= ポートフォリオリターン - TOPIXリターン
   created_at TEXT,
   -- 作成日時（YYYY-MM-DD HH:MM:SS）
   PRIMARY KEY (rebalance_date, as_of_date)
@@ -166,5 +170,93 @@ CREATE TABLE IF NOT EXISTS backtest_stock_performance (
   -- 分割を考慮した調整済み評価価格（current_price * split_multiplier）
   return_pct REAL,
   -- リターン（%）
+  investment_amount REAL,
+  -- 投資金額（比較用の仮想金額）
+  topix_return_pct REAL,
+  -- TOPIXリターン（%）
+  excess_return_pct REAL,
+  -- 超過リターン（%）= 銘柄リターン - TOPIXリターン
   PRIMARY KEY (rebalance_date, as_of_date, code)
+);
+-- -----------------------
+-- 8) holdings : 実際の保有銘柄
+-- -----------------------
+CREATE TABLE IF NOT EXISTS holdings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  purchase_date TEXT NOT NULL,
+  -- 購入日（YYYY-MM-DD）
+  code TEXT NOT NULL,
+  -- 銘柄コード
+  shares REAL NOT NULL,
+  -- 株数
+  purchase_price REAL NOT NULL,
+  -- 購入単価
+  current_price REAL,
+  -- 現在価格（最新の終値、更新時に計算）
+  unrealized_pnl REAL,
+  -- 含み損益（保有中の場合、更新時に計算）
+  return_pct REAL,
+  -- リターン（%）、更新時に計算
+  sell_date TEXT,
+  -- 売却日（YYYY-MM-DD、NULLの場合は保有中）
+  sell_price REAL,
+  -- 売却単価（NULLの場合は保有中）
+  realized_pnl REAL,
+  -- 実現損益（売却時のみ、更新時に計算）
+  topix_return_pct REAL,
+  -- TOPIXリターン（%）、更新時に計算
+  excess_return_pct REAL,
+  -- 超過リターン（%）= リターン - TOPIXリターン、更新時に計算
+  created_at TEXT,
+  -- 作成日時（YYYY-MM-DD HH:MM:SS）
+  updated_at TEXT,
+  -- 更新日時（YYYY-MM-DD HH:MM:SS）
+  UNIQUE(purchase_date, code, shares, purchase_price)
+  -- 同じ購入日・銘柄・株数・単価の重複を防ぐ
+);
+-- -----------------------
+-- 9) holdings_summary : 保有銘柄全体のパフォーマンスサマリー
+-- -----------------------
+CREATE TABLE IF NOT EXISTS holdings_summary (
+  as_of_date TEXT NOT NULL,
+  -- 評価日（YYYY-MM-DD）
+  total_investment REAL,
+  -- 総投資額（保有中の銘柄のみ）
+  total_unrealized_pnl REAL,
+  -- 総含み損益（保有中の銘柄のみ）
+  total_realized_pnl REAL,
+  -- 総実現損益（売却済み銘柄のみ）
+  portfolio_return_pct REAL,
+  -- ポートフォリオ全体のリターン（%）
+  topix_return_pct REAL,
+  -- TOPIXリターン（%）
+  excess_return_pct REAL,
+  -- 超過リターン（%）= ポートフォリオリターン - TOPIXリターン
+  num_holdings INTEGER,
+  -- 保有中銘柄数
+  num_sold INTEGER,
+  -- 売却済み銘柄数
+  created_at TEXT,
+  -- 作成日時（YYYY-MM-DD HH:MM:SS）
+  updated_at TEXT,
+  -- 更新日時（YYYY-MM-DD HH:MM:SS）
+  PRIMARY KEY (as_of_date)
+);
+-- -----------------------
+-- 10) index_daily : 指数データ（TOPIXなど）
+-- -----------------------
+CREATE TABLE IF NOT EXISTS index_daily (
+  date TEXT NOT NULL,
+  -- YYYY-MM-DD
+  index_code TEXT NOT NULL,
+  -- 指数コード（例: "0000" はTOPIX指数）
+  open REAL,
+  -- 始値
+  high REAL,
+  -- 高値
+  low REAL,
+  -- 安値
+  close REAL,
+  -- 終値
+  PRIMARY KEY (date, index_code)
 );

@@ -5,3 +5,9 @@
 ALTER TABLE prices_daily
 ADD COLUMN open REAL;
 
+
+
+
+
+
+

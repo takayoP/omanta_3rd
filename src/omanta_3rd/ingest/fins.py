@@ -22,8 +22,8 @@ def _daterange(d1: str, d2: str):
         d += timedelta(days=1)
 
 def fetch_financial_statements_by_date(client: JQuantsClient, disclosed_date: str):
-    # /fins/statements は date か code が必須。過去履歴は date で積むのが正解
-    return client.get_all_pages("/fins/statements", params={"date": disclosed_date})
+    # /v2/fins/summary は date か code が必須。過去履歴は date で積むのが正解
+    return client.get_all_pages("/fins/summary", params={"date": disclosed_date})
 
 def _to_float(value: Any) -> Optional[float]:
     """値をfloatに変換（None/空文字はNone）"""
@@ -51,37 +51,42 @@ def _normalize_code(local_code: str) -> str:
 
 def _map_row_to_db(row: Dict[str, Any]) -> Dict[str, Any]:
     """
-    /fins/statements の1行をDBの fins_statements スキーマに変換する
-    （APIキー → snake_case列名、数値はfloatへ）
+    /v2/fins/summary の1行をDBの fins_statements スキーマに変換する
+    （V2 APIのカラム名 → snake_case列名、数値はfloatへ）
+    
+    V2 APIのカラム名:
+    - DiscDate, DiscTime, Code, CurPerType, CurPerEn
+    - OP, NP, Eq, EPS, BPS (実績)
+    - FOP, FNP, FEPS (予想)
+    - NxFOP, NxFNp, NxFEPS (次年度予想)
+    - ShOutFY, TrShFY (株数)
     """
     return {
-        "disclosed_date": row.get("DisclosedDate"),
-        "disclosed_time": row.get("DisclosedTime"),
-        "code": _normalize_code(row.get("LocalCode")),
-        "type_of_current_period": row.get("TypeOfCurrentPeriod"),
-        "current_period_end": row.get("CurrentPeriodEndDate"),
+        "disclosed_date": row.get("DiscDate"),
+        "disclosed_time": row.get("DiscTime"),
+        "code": _normalize_code(row.get("Code")),
+        "type_of_current_period": row.get("CurPerType"),
+        "current_period_end": row.get("CurPerEn"),
 
         # 実績（FY中心）
-        "operating_profit": _to_float(row.get("OperatingProfit")),
-        "profit": _to_float(row.get("Profit")),
-        "equity": _to_float(row.get("Equity")),
-        "eps": _to_float(row.get("EarningsPerShare")),
-        "bvps": _to_float(row.get("BookValuePerShare")),
+        "operating_profit": _to_float(row.get("OP")),
+        "profit": _to_float(row.get("NP")),
+        "equity": _to_float(row.get("Eq")),
+        "eps": _to_float(row.get("EPS")),
+        "bvps": _to_float(row.get("BPS")),
 
         # 予想（会社予想）
-        "forecast_operating_profit": _to_float(row.get("ForecastOperatingProfit")),
-        "forecast_profit": _to_float(row.get("ForecastProfit")),
-        "forecast_eps": _to_float(row.get("ForecastEarningsPerShare")),
+        "forecast_operating_profit": _to_float(row.get("FOP")),
+        "forecast_profit": _to_float(row.get("FNP")),
+        "forecast_eps": _to_float(row.get("FEPS")),
 
-        "next_year_forecast_operating_profit": _to_float(row.get("NextYearForecastOperatingProfit")),
-        "next_year_forecast_profit": _to_float(row.get("NextYearForecastProfit")),
-        "next_year_forecast_eps": _to_float(row.get("NextYearForecastEarningsPerShare")),
+        "next_year_forecast_operating_profit": _to_float(row.get("NxFOP")),
+        "next_year_forecast_profit": _to_float(row.get("NxFNp")),
+        "next_year_forecast_eps": _to_float(row.get("NxFEPS")),
 
         # 株数（時価総額計算に使えるなら使う）
-        "shares_outstanding": _to_float(
-            row.get("NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock")
-        ),
-        "treasury_shares": _to_float(row.get("NumberOfTreasuryStockAtTheEndOfFiscalYear")),
+        "shares_outstanding": _to_float(row.get("ShOutFY")),
+        "treasury_shares": _to_float(row.get("TrShFY")),
     }
 
 
@@ -89,7 +94,7 @@ def _filter_by_disclosed_date(rows: List[Dict[str, Any]],
                              date_from: Optional[str],
                              date_to: Optional[str]) -> List[Dict[str, Any]]:
     """
-    DisclosedDate（YYYY-MM-DD）で期間フィルタ。
+    DiscDate（YYYY-MM-DD）で期間フィルタ（V2 API対応）。
     ISO形式なら文字列比較でも安全なので、pandas不要で軽量に。
     """
     if not rows:
@@ -99,7 +104,7 @@ def _filter_by_disclosed_date(rows: List[Dict[str, Any]],
 
     out = []
     for r in rows:
-        d = r.get("DisclosedDate")
+        d = r.get("DiscDate")
         if not d:
             continue
         if date_from and d < date_from:
@@ -134,13 +139,13 @@ def fetch_financial_statements(
     date_to: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    /fins/statements は date_from/date_to を受け付けないので、
+    /v2/fins/summary は date_from/date_to を受け付けないので、
     code指定で全件取得 → DisclosedDateでローカルフィルタ。
     """
     if not code:
         raise ValueError("code is required for fetch_financial_statements")
 
-    rows = client.get_all_pages("/fins/statements", params={"code": code})
+    rows = client.get_all_pages("/fins/summary", params={"code": code})
     rows = _filter_by_disclosed_date(rows, date_from, date_to)
     return rows
 
@@ -252,7 +257,7 @@ def ingest_financial_statements(
     date_to: Optional[str] = None,
     code: Optional[str] = None,
     client: Optional[JQuantsClient] = None,
-    sleep_sec: float = 0.2,
+    sleep_sec: float = 0.0,
     batch_size: int = 2000,
 ):
     if client is None:
@@ -286,7 +291,8 @@ def ingest_financial_statements(
             save_financial_statements(buffer)
             buffer.clear()
 
-        time.sleep(sleep_sec)
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
 
     if buffer:
         save_financial_statements(buffer)

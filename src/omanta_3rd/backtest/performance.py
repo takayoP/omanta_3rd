@@ -8,6 +8,7 @@ import sqlite3
 import pandas as pd
 
 from ..infra.db import connect_db, upsert
+from ..ingest.indices import TOPIX_CODE
 
 
 def _get_next_trading_day(conn, date: str) -> Optional[str]:
@@ -35,6 +36,37 @@ def _get_next_trading_day(conn, date: str) -> Optional[str]:
         return None
     
     return str(next_date_df["next_date"].iloc[0])
+
+
+def _get_topix_price(conn, date: str, use_open: bool = False) -> Optional[float]:
+    """
+    指定日のTOPIX価格を取得
+    
+    Args:
+        conn: データベース接続
+        date: 日付（YYYY-MM-DD）
+        use_open: Trueの場合は始値、Falseの場合は終値を取得（デフォルト: False）
+    
+    Returns:
+        TOPIX価格（始値または終値）、存在しない場合はNone
+    """
+    price_column = "open" if use_open else "close"
+    price_df = pd.read_sql_query(
+        f"""
+        SELECT {price_column}
+        FROM index_daily
+        WHERE index_code = ? AND date <= ?
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        conn,
+        params=(TOPIX_CODE, date),
+    )
+    
+    if price_df.empty or pd.isna(price_df[price_column].iloc[0]):
+        return None
+    
+    return float(price_df[price_column].iloc[0])
 
 
 def _split_multiplier_between(conn, code: str, start_date: str, end_date: str) -> float:
@@ -212,6 +244,53 @@ def calculate_portfolio_performance(
         portfolio["weighted_return"] = portfolio["weight"] * portfolio["return_pct"]
         total_return = portfolio["weighted_return"].sum()
         
+        # TOPIX比較: 購入日と評価日のTOPIX価格を取得
+        # 購入: リバランス日の翌営業日の始値（個別株と同様）
+        # 売却: as_of_dateの直近営業日の終値（個別株と同様）
+        topix_buy_price = _get_topix_price(conn, next_trading_day, use_open=True)
+        topix_sell_price = _get_topix_price(conn, as_of_date, use_open=False)
+        
+        # TOPIXリターンの計算
+        topix_return_pct = None
+        if topix_buy_price is not None and topix_sell_price is not None and topix_buy_price > 0:
+            topix_return_pct = (topix_sell_price - topix_buy_price) / topix_buy_price * 100.0
+        
+        # 仮想的な総投資金額（比較用、実際の投資金額とは無関係）
+        # 各銘柄の投資金額は weight × 総投資金額で計算されるため、
+        # 総投資金額の値自体は比較結果に影響しない（リターン率は同じ）
+        hypothetical_total_investment = 1_000_000.0  # 100万円（比較用の仮想金額）
+        
+        # 各銘柄のTOPIX比較リターンを計算
+        portfolio["investment_amount"] = portfolio["weight"] * hypothetical_total_investment
+        portfolio["topix_return_pct"] = topix_return_pct if topix_return_pct is not None else None
+        
+        # 銘柄別のTOPIX比較情報を追加
+        portfolio["topix_comparison"] = portfolio.apply(
+            lambda row: {
+                "investment_amount": float(row["investment_amount"]) if pd.notna(row["investment_amount"]) else None,
+                "topix_return_pct": float(row["topix_return_pct"]) if pd.notna(row["topix_return_pct"]) else None,
+                "stock_return_pct": float(row["return_pct"]) if pd.notna(row["return_pct"]) else None,
+                "excess_return_pct": (
+                    float(row["return_pct"] - row["topix_return_pct"])
+                    if pd.notna(row["return_pct"]) and pd.notna(row["topix_return_pct"])
+                    else None
+                ),
+            },
+            axis=1
+        )
+        
+        # ポートフォリオ全体のTOPIX比較
+        portfolio_topix_comparison = {
+            "total_investment": hypothetical_total_investment,
+            "portfolio_return_pct": float(total_return) if not pd.isna(total_return) else None,
+            "topix_return_pct": float(topix_return_pct) if topix_return_pct is not None else None,
+            "excess_return_pct": (
+                float(total_return - topix_return_pct)
+                if not pd.isna(total_return) and topix_return_pct is not None
+                else None
+            ),
+        }
+        
         # 統計情報
         valid_returns = portfolio[portfolio["return_pct"].notna()]["return_pct"]
         
@@ -224,8 +303,10 @@ def calculate_portfolio_performance(
             "avg_return_pct": float(valid_returns.mean()) if len(valid_returns) > 0 else None,
             "min_return_pct": float(valid_returns.min()) if len(valid_returns) > 0 else None,
             "max_return_pct": float(valid_returns.max()) if len(valid_returns) > 0 else None,
+            "topix_comparison": portfolio_topix_comparison,
             "stocks": portfolio[
-                ["code", "weight", "rebalance_price", "current_price", "split_multiplier", "adjusted_current_price", "return_pct"]
+                ["code", "weight", "rebalance_price", "current_price", "split_multiplier", 
+                 "adjusted_current_price", "return_pct", "topix_comparison"]
             ].to_dict("records"),
         }
         
@@ -277,6 +358,7 @@ def save_performance_to_db(
     
     with connect_db() as conn:
         # ポートフォリオ全体のパフォーマンスを保存
+        topix_comp = performance.get("topix_comparison", {})
         perf_row = {
             "rebalance_date": performance["rebalance_date"],
             "as_of_date": performance["as_of_date"],
@@ -286,6 +368,8 @@ def save_performance_to_db(
             "avg_return_pct": performance.get("avg_return_pct"),
             "min_return_pct": performance.get("min_return_pct"),
             "max_return_pct": performance.get("max_return_pct"),
+            "topix_return_pct": topix_comp.get("topix_return_pct"),
+            "excess_return_pct": topix_comp.get("excess_return_pct"),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         upsert(conn, "backtest_performance", [perf_row], conflict_columns=["rebalance_date", "as_of_date"])
@@ -297,6 +381,7 @@ def save_performance_to_db(
             for stock in stocks:
                 # codeが存在することを確認
                 if "code" in stock:
+                    topix_comp_stock = stock.get("topix_comparison", {})
                     stock_rows.append({
                         "rebalance_date": performance["rebalance_date"],
                         "as_of_date": performance["as_of_date"],
@@ -307,6 +392,9 @@ def save_performance_to_db(
                         "split_multiplier": stock.get("split_multiplier"),
                         "adjusted_current_price": stock.get("adjusted_current_price"),
                         "return_pct": stock.get("return_pct"),
+                        "investment_amount": topix_comp_stock.get("investment_amount"),
+                        "topix_return_pct": topix_comp_stock.get("topix_return_pct"),
+                        "excess_return_pct": topix_comp_stock.get("excess_return_pct"),
                     })
         
         if stock_rows:

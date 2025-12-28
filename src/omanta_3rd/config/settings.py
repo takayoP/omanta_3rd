@@ -28,11 +28,14 @@ else:
     DB_PATH = default_path
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# J-Quants API設定
+# J-Quants API設定 (V2 API)
+JQUANTS_API_KEY = os.getenv("JQUANTS_API_KEY", "")
+JQUANTS_API_BASE_URL = os.getenv("JQUANTS_API_BASE_URL", "https://api.jquants.com/v2")
+
+# V1 API用の設定（後方互換性のため残すが、V2では不要）
 JQUANTS_REFRESH_TOKEN = os.getenv("JQUANTS_REFRESH_TOKEN", "")
 JQUANTS_MAILADDRESS = os.getenv("JQUANTS_MAILADDRESS", "")
 JQUANTS_PASSWORD = os.getenv("JQUANTS_PASSWORD", "")
-JQUANTS_API_BASE_URL = os.getenv("JQUANTS_API_BASE_URL", "https://api.jquants.com/v1")
 
 # ログ設定
 LOG_DIR = Path(os.getenv("LOG_DIR", PROJECT_ROOT / "data" / "logs"))

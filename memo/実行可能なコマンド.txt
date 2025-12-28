@@ -41,3 +41,24 @@ python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --as-of-date 2025
 
 企業コードを入力してAPIから取得し、欠損値を確認するスクリプト
 python check_api_fins.py
+
+# すべてのテーブルを最新まで更新
+python update_all_data.py
+
+# 価格データのみ更新
+python update_all_data.py --target prices
+
+# 指定期間を更新
+python update_all_data.py --start 2024-01-01 --end 2024-12-31
+
+# すべての保有中銘柄を更新
+python -m src.omanta_3rd.jobs.update_holdings
+
+# 特定の銘柄を更新
+python -m src.omanta_3rd.jobs.update_holdings --holding-id 1 --as-of-date 2025-12-28
+
+# 保有銘柄の追加
+python -m src.omanta_3rd.jobs.add_holding --purchase-date 2025-01-01 --code 7203 --shares 100 --purchase-price 2500
+
+# 保有銘柄の売却
+python -m src.omanta_3rd.jobs.sell_holding --holding-id 1 --sell-date 2025-12-28

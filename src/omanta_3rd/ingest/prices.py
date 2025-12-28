@@ -42,10 +42,10 @@ def _daterange(date_from: str, date_to: str) -> List[str]:
 
 def fetch_prices_by_date(client: JQuantsClient, date: str) -> List[Dict[str, Any]]:
     """
-    /prices/daily_quotes は date か code が必須。
+    /v2/equities/bars/daily は date か code が必須。
     ここでは date 指定で1日分を取得する。
     """
-    rows = client.get_all_pages("/prices/daily_quotes", params={"date": date})
+    rows = client.get_all_pages("/equities/bars/daily", params={"date": date})
     return rows
 
 
@@ -53,33 +53,33 @@ def _map_price_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """
     APIの1行をDBスキーマに合わせて変換
     
-    J-Quants APIの/prices/daily_quotesエンドポイントから取得できるフィールド:
-    - Open: 始値（調整前）
-    - Close: 終値（調整前）
-    - AdjustmentClose: 調整済終値
-    - AdjustmentFactor: 調整係数
-    - AdjustmentVolume: 調整済出来高
-    - TurnoverValue: 売買代金
+    J-Quants API V2の/v2/equities/bars/dailyエンドポイントから取得できるフィールド:
+    - O: 始値（調整前）
+    - C: 終値（調整前）
+    - AdjC: 調整済終値
+    - AdjFactor: 調整係数
+    - AdjVo: 調整済出来高
+    - Va: 売買代金
     """
     code = _normalize_code(row.get("Code"))
     
-    # Closeフィールドを取得（調整前終値）
-    close = row.get("Close")
-    # CloseがNoneの場合は、AdjustmentCloseを使用（フォールバック）
-    # ただし、通常はCloseが提供されるはず
-    # 注意: CloseとAdjustmentCloseの両方がNoneの場合は、その日が休場日や取引がなかった可能性がある
+    # Cフィールドを取得（調整前終値）
+    close = row.get("C")
+    # CがNoneの場合は、AdjCを使用（フォールバック）
+    # ただし、通常はCが提供されるはず
+    # 注意: CとAdjCの両方がNoneの場合は、その日が休場日や取引がなかった可能性がある
     if close is None:
-        close = row.get("AdjustmentClose")
+        close = row.get("AdjC")
     
     return {
         "date": row.get("Date"),
         "code": code,
-        "open": row.get("Open"),  # 始値（調整前）
-        "close": close,  # 調整前終値（Closeフィールドから取得）
-        "adj_close": row.get("AdjustmentClose"),  # 調整済終値
-        "adj_volume": row.get("AdjustmentVolume"),  # 調整済出来高
-        "turnover_value": row.get("TurnoverValue"),  # 売買代金
-        "adjustment_factor": row.get("AdjustmentFactor"),  # 調整係数
+        "open": row.get("O"),  # 始値（調整前）
+        "close": close,  # 調整前終値（Cフィールドから取得）
+        "adj_close": row.get("AdjC"),  # 調整済終値
+        "adj_volume": row.get("AdjVo"),  # 調整済出来高
+        "turnover_value": row.get("Va"),  # 売買代金
+        "adjustment_factor": row.get("AdjFactor"),  # 調整係数
     }
 
 
@@ -97,7 +97,7 @@ def ingest_prices(
     start_date: str,
     end_date: str,
     client: Optional[JQuantsClient] = None,
-    sleep_sec: float = 0.2,
+    sleep_sec: float = 0.0,
     batch_size: int = 5000,
 ):
     """
@@ -107,7 +107,7 @@ def ingest_prices(
         start_date: 開始日（YYYY-MM-DD）
         end_date: 終了日（YYYY-MM-DD）
         client: J-Quants APIクライアント
-        sleep_sec: レート制限対策の待機
+        sleep_sec: 追加の待機時間（デフォルト: 0.0。JQuantsClientでレート制限管理済みのため通常は不要）
         batch_size: 一括保存する件数
     """
     if client is None:
@@ -130,7 +130,8 @@ def ingest_prices(
             save_prices(buf)
             buf.clear()
 
-        time.sleep(sleep_sec)
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
 
     if buf:
         save_prices(buf)
