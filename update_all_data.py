@@ -290,6 +290,8 @@ def main(
     # 保有銘柄のパフォーマンス更新（価格データ更新後に実行）
     if target in ["all", "prices", "holdings"]:
         try:
+            from src.omanta_3rd.portfolio.holdings import update_holding_performance, update_holdings_summary
+            
             update_holding_performance()
             update_holdings_summary()
             results["holdings"] = True

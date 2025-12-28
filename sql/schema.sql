@@ -187,10 +187,14 @@ CREATE TABLE IF NOT EXISTS holdings (
   -- 購入日（YYYY-MM-DD）
   code TEXT NOT NULL,
   -- 銘柄コード
+  company_name TEXT,
+  -- 社名（購入日時点の最新の社名）
   shares REAL NOT NULL,
   -- 株数
   purchase_price REAL NOT NULL,
   -- 購入単価
+  broker TEXT,
+  -- 証券会社名（例: "SBI証券", "大和証券"）
   current_price REAL,
   -- 現在価格（最新の終値、更新時に計算）
   unrealized_pnl REAL,
@@ -243,7 +247,25 @@ CREATE TABLE IF NOT EXISTS holdings_summary (
   PRIMARY KEY (as_of_date)
 );
 -- -----------------------
--- 10) index_daily : 指数データ（TOPIXなど）
+-- 10) earnings_calendar : 決算発表予定日
+-- -----------------------
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+  code TEXT NOT NULL,
+  -- 銘柄コード
+  announcement_date TEXT NOT NULL,
+  -- 決算発表予定日（YYYY-MM-DD）
+  period_type TEXT,
+  -- 期間種別（FY / 1Q / 2Q / 3Q）
+  period_end TEXT,
+  -- 当期末日（YYYY-MM-DD）
+  created_at TEXT,
+  -- 作成日時（YYYY-MM-DD HH:MM:SS）
+  updated_at TEXT,
+  -- 更新日時（YYYY-MM-DD HH:MM:SS）
+  PRIMARY KEY (code, announcement_date, period_type, period_end)
+);
+-- -----------------------
+-- 11) index_daily : 指数データ（TOPIXなど）
 -- -----------------------
 CREATE TABLE IF NOT EXISTS index_daily (
   date TEXT NOT NULL,

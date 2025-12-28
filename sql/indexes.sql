@@ -14,3 +14,5 @@ CREATE INDEX IF NOT EXISTS idx_holdings_purchase_date ON holdings (purchase_date
 CREATE INDEX IF NOT EXISTS idx_holdings_sell_date ON holdings (sell_date);
 CREATE INDEX IF NOT EXISTS idx_holdings_active ON holdings (sell_date) WHERE sell_date IS NULL;
 CREATE INDEX IF NOT EXISTS idx_holdings_summary_date ON holdings_summary (as_of_date);
+CREATE INDEX IF NOT EXISTS idx_earnings_calendar_date ON earnings_calendar (announcement_date);
+CREATE INDEX IF NOT EXISTS idx_earnings_calendar_code ON earnings_calendar (code);

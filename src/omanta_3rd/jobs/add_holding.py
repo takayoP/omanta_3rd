@@ -11,6 +11,7 @@ def main(
     code: str,
     shares: float,
     purchase_price: float,
+    broker: str | None = None,
 ):
     """
     保有銘柄を追加
@@ -20,6 +21,7 @@ def main(
         code: 銘柄コード
         shares: 株数
         purchase_price: 購入単価
+        broker: 証券会社名（例: "SBI証券", "大和証券"）
     """
     try:
         holding = add_holding(
@@ -27,12 +29,15 @@ def main(
             code=code,
             shares=shares,
             purchase_price=purchase_price,
+            broker=broker,
         )
         print(f"保有銘柄を追加しました:")
         print(f"  購入日: {holding['purchase_date']}")
         print(f"  銘柄コード: {holding['code']}")
         print(f"  株数: {holding['shares']}")
         print(f"  購入単価: {holding['purchase_price']}")
+        if holding.get('broker'):
+            print(f"  証券会社: {holding['broker']}")
         print()
         print("パフォーマンスを更新するには以下のコマンドを実行してください:")
         print(f"  python -m src.omanta_3rd.jobs.update_holdings")
@@ -67,6 +72,11 @@ if __name__ == "__main__":
         required=True,
         help="購入単価",
     )
+    parser.add_argument(
+        "--broker",
+        type=str,
+        help="証券会社名（例: SBI証券, 大和証券）",
+    )
     
     args = parser.parse_args()
     
@@ -75,5 +85,6 @@ if __name__ == "__main__":
         code=args.code,
         shares=args.shares,
         purchase_price=args.purchase_price,
+        broker=args.broker,
     )
 

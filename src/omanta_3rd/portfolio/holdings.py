@@ -16,6 +16,7 @@ def add_holding(
     code: str,
     shares: float,
     purchase_price: float,
+    broker: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     保有銘柄を追加
@@ -25,6 +26,7 @@ def add_holding(
         code: 銘柄コード
         shares: 株数
         purchase_price: 購入単価
+        broker: 証券会社名（例: "SBI証券", "大和証券"）
         
     Returns:
         追加された銘柄の情報
@@ -35,6 +37,7 @@ def add_holding(
             "code": code,
             "shares": shares,
             "purchase_price": purchase_price,
+            "broker": broker,
             "current_price": None,
             "unrealized_pnl": None,
             "return_pct": None,
@@ -108,6 +111,22 @@ def update_holding_performance(
             # 評価日を決定（売却済みの場合は売却日、保有中の場合はas_of_date）
             eval_date = sell_date if sell_date else as_of_date
             
+            # 社名を取得（購入日時点の最新の社名）
+            company_name = None
+            company_name_df = pd.read_sql_query(
+                """
+                SELECT company_name
+                FROM listed_info
+                WHERE code = ? AND date <= ?
+                ORDER BY date DESC
+                LIMIT 1
+                """,
+                conn,
+                params=(code, purchase_date),
+            )
+            if not company_name_df.empty and pd.notna(company_name_df["company_name"].iloc[0]):
+                company_name = company_name_df["company_name"].iloc[0]
+            
             # 現在価格を取得
             if sell_date:
                 # 売却済み：sell_priceが設定されている場合はそれを使用、なければ売却日の終値を使用
@@ -180,6 +199,7 @@ def update_holding_performance(
                 "realized_pnl": realized_pnl,
                 "topix_return_pct": topix_return_pct,
                 "excess_return_pct": excess_return_pct,
+                "company_name": company_name,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             
@@ -206,6 +226,7 @@ def update_holding_performance(
                         realized_pnl = ?,
                         topix_return_pct = ?,
                         excess_return_pct = ?,
+                        company_name = COALESCE(?, company_name),
                         updated_at = ?
                     WHERE id = ?
                     """,
@@ -218,6 +239,7 @@ def update_holding_performance(
                         holding.get("realized_pnl"),
                         holding.get("topix_return_pct"),
                         holding.get("excess_return_pct"),
+                        holding.get("company_name"),
                         holding.get("updated_at"),
                         holding_id,
                     ),
@@ -226,6 +248,10 @@ def update_holding_performance(
             
             # 保有銘柄全体のサマリーを更新
             update_holdings_summary(as_of_date=as_of_date)
+            
+            # 翌営業日の決算発表予定日をチェック（保有中のみ）
+            if not holding_id:  # すべての銘柄を更新する場合のみ
+                _check_and_show_earnings_announcements(as_of_date)
 
 
 def sell_holding(
@@ -445,36 +471,37 @@ def get_holdings(
     as_of_date: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    保有銘柄一覧を取得
+    保有銘柄一覧を取得（社名を含む）
     
     Args:
         active_only: Trueの場合は保有中のみ、Falseの場合はすべて
         as_of_date: 評価日（YYYY-MM-DD、Noneの場合は最新の価格データを使用）
         
     Returns:
-        保有銘柄のリスト
+        保有銘柄のリスト（社名を含む）
     """
     with connect_db() as conn:
-        if active_only:
-            query = "SELECT * FROM holdings WHERE sell_date IS NULL ORDER BY purchase_date DESC, code"
-        else:
-            query = "SELECT * FROM holdings ORDER BY purchase_date DESC, code"
-        
-        holdings_df = pd.read_sql_query(query, conn)
-        
-        if holdings_df.empty:
-            return []
-        
         # パフォーマンスを更新（保有中のみ）
         if active_only:
             update_holding_performance(as_of_date=as_of_date)
             # サマリーも更新
             update_holdings_summary(as_of_date=as_of_date)
-            # 再取得
-            holdings_df = pd.read_sql_query(query, conn)
+            # 翌営業日の決算発表予定日をチェック
+            _check_and_show_earnings_announcements(as_of_date)
         else:
             # すべての銘柄を取得する場合でも、サマリーは最新の状態に更新
             update_holdings_summary(as_of_date=as_of_date)
+        
+        # 保有銘柄を取得（社名はテーブルに保存されている）
+        if active_only:
+            query = "SELECT * FROM holdings WHERE sell_date IS NULL ORDER BY purchase_date DESC, code"
+        else:
+            query = "SELECT * FROM holdings ORDER BY purchase_date DESC, code"
+        
+        holdings_df = pd.read_sql_query(query, conn, params=params)
+        
+        if holdings_df.empty:
+            return []
         
         return holdings_df.to_dict("records")
 
@@ -500,4 +527,68 @@ def _get_topix_price(conn, date: str, use_open: bool = False) -> Optional[float]
         return None
     
     return float(price_df[price_column].iloc[0])
+
+
+def _check_and_show_earnings_announcements(as_of_date: Optional[str] = None) -> None:
+    """
+    翌営業日の決算発表予定日がある保有銘柄をチェックしてポップアップ表示
+    
+    Args:
+        as_of_date: 基準日（YYYY-MM-DD、Noneの場合は今日）
+    """
+    from datetime import datetime
+    from ..ingest.earnings_calendar import check_upcoming_announcements, get_next_trading_day
+    
+    if as_of_date is None:
+        as_of_date = datetime.now().strftime("%Y-%m-%d")
+    
+    next_trading_day = get_next_trading_day(as_of_date)
+    if not next_trading_day:
+        return
+    
+    upcoming = check_upcoming_announcements(as_of_date)
+    
+    if upcoming:
+        # ポップアップ表示
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            
+            root = tk.Tk()
+            root.withdraw()  # メインウィンドウを非表示
+            
+            message = f"翌営業日（{next_trading_day}）に決算発表予定がある保有銘柄:\n\n"
+            for item in upcoming:
+                code = item.get("code", "")
+                company_name = item.get("company_name", "N/A")
+                period_type = item.get("period_type", "")
+                period_end = item.get("period_end", "")
+                message += f"・{code} {company_name}"
+                if period_type:
+                    message += f" ({period_type}"
+                    if period_end:
+                        message += f", 期末: {period_end}"
+                    message += ")"
+                message += "\n"
+            
+            messagebox.showinfo("決算発表予定日のお知らせ", message)
+            root.destroy()
+        except ImportError:
+            # tkinterが利用できない場合はコンソールに表示
+            print("\n" + "=" * 80)
+            print(f"【重要】翌営業日（{next_trading_day}）に決算発表予定がある保有銘柄:")
+            print("=" * 80)
+            for item in upcoming:
+                code = item.get("code", "")
+                company_name = item.get("company_name", "N/A")
+                period_type = item.get("period_type", "")
+                period_end = item.get("period_end", "")
+                print(f"  ・{code} {company_name}", end="")
+                if period_type:
+                    print(f" ({period_type}", end="")
+                    if period_end:
+                        print(f", 期末: {period_end}", end="")
+                    print(")", end="")
+                print()
+            print("=" * 80 + "\n")
 
