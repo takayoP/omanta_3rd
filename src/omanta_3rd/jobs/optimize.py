@@ -6,7 +6,7 @@ import argparse
 import json
 from dataclasses import dataclass, replace, fields
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import pandas as pd
 import optuna
@@ -14,6 +14,16 @@ from optuna.visualization import plot_optimization_history, plot_param_importanc
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 import multiprocessing as mp
+import sqlite3
+import threading
+import time
+
+try:
+    import tkinter as tk
+    from tkinter import ttk
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
 
 from ..infra.db import connect_db
 from ..jobs.monthly_run import (
@@ -71,6 +81,8 @@ def _entry_score_with_params(
                 bb_score = (z - params.bb_z_base) / (params.bb_z_max - params.bb_z_base)
             else:
                 bb_score = 0.0
+            # クリップ処理（0〜1に制限）
+            bb_score = np.clip(bb_score, 0.0, 1.0)
                 
         if not pd.isna(rsi):
             # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
@@ -78,6 +90,8 @@ def _entry_score_with_params(
                 rsi_score = (rsi - params.rsi_base) / (params.rsi_max - params.rsi_base)
             else:
                 rsi_score = 0.0
+            # クリップ処理（0〜1に制限）
+            rsi_score = np.clip(rsi_score, 0.0, 1.0)
 
         # 重み付き合計
         total_weight = params.bb_weight + params.rsi_weight
@@ -294,15 +308,17 @@ def _run_single_backtest(
     strategy_params_dict: dict,
     entry_params_dict: dict,
     as_of_date: Optional[str] = None,
+    save_portfolio_to_db: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
-    単一のリバランス日に対するバックテスト実行（並列化用）
+    単一のリバランス日に対するバックテスト実行（並列化用、最適化版）
     
     Args:
         rebalance_date: リバランス日
         strategy_params_dict: StrategyParamsを辞書化したもの
         entry_params_dict: EntryScoreParamsを辞書化したもの
         as_of_date: 評価日
+        save_portfolio_to_db: ポートフォリオをDBに保存するか（デフォルト: False、後で一括保存）
     
     Returns:
         パフォーマンス結果（エラー時はNone）
@@ -312,32 +328,96 @@ def _run_single_backtest(
         strategy_params = StrategyParams(**strategy_params_dict)
         entry_params = EntryScoreParams(**entry_params_dict)
         
-        with connect_db() as conn:
-            # 特徴量を構築
-            feat = build_features(conn, rebalance_date)
-            
-            if feat.empty:
-                return None
-            
-            # ポートフォリオを選択（パラメータ化版）
-            portfolio = _select_portfolio_with_params(
-                feat, strategy_params, entry_params
-            )
-            
-            if portfolio.empty:
-                return None
-            
-            # 一時的に保存
-            save_portfolio(conn, portfolio)
-            
-            # パフォーマンスを計算
-            perf = calculate_portfolio_performance(rebalance_date, as_of_date)
-            
-            if "error" not in perf:
-                return perf
+        # 1) feat を必ず作る（read_only失敗ならread_writeへ）
+        try:
+            with connect_db(read_only=True) as conn:
+                feat = build_features(conn, rebalance_date)
+        except sqlite3.OperationalError as e:
+            # 読み取り専用エラーの場合は通常の接続を使用
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                with connect_db(read_only=False) as conn:
+                    feat = build_features(conn, rebalance_date)
+            else:
+                raise
+        
+        # 2) ここからは共通処理（exceptの外！）
+        if feat is None or feat.empty:
             return None
+        
+        # ポートフォリオを選択（パラメータ化版）
+        portfolio = _select_portfolio_with_params(
+            feat, strategy_params, entry_params
+        )
+        
+        if portfolio is None or portfolio.empty:
+            return None
+        
+        # 3) perf がDBのportfolioを読むなら、保存してから計算が必要
+        if save_portfolio_to_db:
+            with connect_db(read_only=False) as conn:
+                save_portfolio(conn, portfolio)
+        
+        # パフォーマンスを計算（DBからポートフォリオを読む設計）
+        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
+        
+        # ポートフォリオ情報を結果に含める（後で一括保存するため）
+        if isinstance(perf, dict) and "error" not in perf:
+            perf["_portfolio"] = portfolio.to_dict("records")  # 一時的に保存
+            return perf
+        return None
     except Exception as e:
         print(f"エラー ({rebalance_date}): {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+def _run_single_backtest_portfolio_only(
+    rebalance_date: str,
+    strategy_params_dict: dict,
+    entry_params_dict: dict,
+) -> Optional[pd.DataFrame]:
+    """
+    単一のリバランス日に対するポートフォリオ選定のみ（並列化用）
+    
+    Args:
+        rebalance_date: リバランス日
+        strategy_params_dict: StrategyParamsを辞書化したもの
+        entry_params_dict: EntryScoreParamsを辞書化したもの
+    
+    Returns:
+        ポートフォリオDataFrame（エラー時はNone）
+    """
+    try:
+        # 辞書からdataclassに復元
+        strategy_params = StrategyParams(**strategy_params_dict)
+        entry_params = EntryScoreParams(**entry_params_dict)
+        
+        # feat を必ず作る（read_only失敗ならread_writeへ）
+        try:
+            with connect_db(read_only=True) as conn:
+                feat = build_features(conn, rebalance_date)
+        except sqlite3.OperationalError as e:
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                with connect_db(read_only=False) as conn:
+                    feat = build_features(conn, rebalance_date)
+            else:
+                raise
+        
+        if feat is None or feat.empty:
+            return None
+        
+        # ポートフォリオを選択（パラメータ化版）
+        portfolio = _select_portfolio_with_params(
+            feat, strategy_params, entry_params
+        )
+        
+        if portfolio is None or portfolio.empty:
+            return None
+        
+        return portfolio
+    except Exception as e:
+        print(f"エラー ({rebalance_date}): {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -349,7 +429,10 @@ def run_backtest_for_optimization(
     n_jobs: int = -1,
 ) -> Dict[str, float]:
     """
-    最適化用のバックテスト実行（並列計算対応）
+    最適化用のバックテスト実行（並列計算対応、B-2方式）
+    
+    設計: 並列ワーカーは「ポートフォリオ選定だけ」を返し、
+          保存後にメインでperformanceを計算する
     
     Args:
         rebalance_dates: リバランス日のリスト
@@ -373,23 +456,21 @@ def run_backtest_for_optimization(
     
     # 並列実行数の決定
     if n_jobs == -1:
-        n_jobs = max(1, mp.cpu_count() - 1)  # CPU数-1（安全のため）
+        n_jobs = mp.cpu_count()
     elif n_jobs <= 0:
         n_jobs = 1
     
-    results = []
+    portfolios = {}  # {rebalance_date: portfolio_df}
     
-    # 並列実行
+    # 並列実行: ポートフォリオ選定のみ
     if n_jobs > 1 and len(rebalance_dates) > 1:
-        # 並列実行
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {
                 executor.submit(
-                    _run_single_backtest,
+                    _run_single_backtest_portfolio_only,
                     rebalance_date,
                     strategy_params_dict,
                     entry_params_dict,
-                    as_of_date,
                 ): rebalance_date
                 for rebalance_date in rebalance_dates
             }
@@ -397,30 +478,46 @@ def run_backtest_for_optimization(
             for future in as_completed(futures):
                 rebalance_date = futures[future]
                 try:
-                    perf = future.result()
-                    if perf is not None:
-                        results.append(perf)
+                    portfolio = future.result()
+                    if portfolio is not None and not portfolio.empty:
+                        portfolios[rebalance_date] = portfolio
                 except Exception as e:
                     print(f"エラー ({rebalance_date}): {e}")
     else:
         # 逐次実行
         for rebalance_date in rebalance_dates:
-            perf = _run_single_backtest(
+            portfolio = _run_single_backtest_portfolio_only(
                 rebalance_date,
                 strategy_params_dict,
                 entry_params_dict,
-                as_of_date,
             )
-            if perf is not None:
-                results.append(perf)
+            if portfolio is not None and not portfolio.empty:
+                portfolios[rebalance_date] = portfolio
+    
+    # デバッグ: 結果が空なら例外を投げる（ペナルティ固定を防ぐ）
+    if not portfolios:
+        raise RuntimeError(
+            f"No portfolios were generated for any rebalance dates. "
+            f"Check worker errors, feature building, or portfolio selection logic."
+        )
+    
+    # ポートフォリオを一括保存
+    with connect_db() as conn:
+        for rebalance_date, portfolio_df in portfolios.items():
+            save_portfolio(conn, portfolio_df)
+    
+    # パフォーマンスを計算（保存後に実行）
+    results = []
+    for rebalance_date in portfolios.keys():
+        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
+        if perf is not None and isinstance(perf, dict) and "error" not in perf:
+            results.append(perf)
     
     if not results:
-        return {
-            "mean_excess_return": -100.0,  # ペナルティ
-            "mean_return": -100.0,
-            "win_rate": 0.0,
-            "sharpe_ratio": -10.0,
-        }
+        raise RuntimeError(
+            f"No performance results were calculated. "
+            f"Check calculate_portfolio_performance() logic."
+        )
     
     # パフォーマンス指標を計算
     excess_returns = [
@@ -436,12 +533,10 @@ def run_backtest_for_optimization(
     ]
     
     if not excess_returns:
-        return {
-            "mean_excess_return": -100.0,
-            "mean_return": -100.0,
-            "win_rate": 0.0,
-            "sharpe_ratio": -10.0,
-        }
+        raise RuntimeError(
+            f"No excess returns were calculated. "
+            f"Check portfolio performance calculation."
+        )
     
     mean_excess_return = np.mean(excess_returns)
     mean_return = np.mean(returns) if returns else 0.0
@@ -475,7 +570,7 @@ def objective(
         trial: OptunaのTrialオブジェクト
         rebalance_dates: リバランス日のリスト
         as_of_date: 評価日
-        n_jobs: 並列実行数（-1でCPU数-1）
+        n_jobs: 並列実行数（-1でCPU数）
     
     Returns:
         最適化対象の値（平均超過リターン）
@@ -521,9 +616,11 @@ def objective(
     # BB Z-scoreはボリンジャーバンドのシグマ（標準偏差の倍数）を表す
     # Z-score = 0: 移動平均、Z-score = ±1: ±1シグマ、Z-score = ±2: ±2シグマ
     rsi_base = trial.suggest_float("rsi_base", 30.0, 70.0)  # 基準値: 30-70
-    rsi_max = trial.suggest_float("rsi_max", 70.0, 90.0)  # 上限: 70-90
+    # rsi_maxはrsi_baseより大きい必要がある（制約付きサンプリング）
+    rsi_max = trial.suggest_float("rsi_max", max(70.0, rsi_base + 5.0), 90.0)  # 上限: rsi_base+5以上、90以下
     bb_z_base = trial.suggest_float("bb_z_base", -2.0, 2.0)  # 基準値: -2～2シグマ
-    bb_z_max = trial.suggest_float("bb_z_max", 2.0, 4.0)  # 上限: 2-4シグマ
+    # bb_z_maxはbb_z_baseより大きい必要がある（制約付きサンプリング）
+    bb_z_max = trial.suggest_float("bb_z_max", max(2.0, bb_z_base + 0.5), 4.0)  # 上限: bb_z_base+0.5以上、4以下
     bb_weight = trial.suggest_float("bb_weight", 0.2, 0.8)
     rsi_weight = 1.0 - bb_weight
     
@@ -548,7 +645,162 @@ def objective(
         + perf["sharpe_ratio"] * 0.1
     )
     
+    # デバッグ用ログ出力
+    print(
+        f"[Trial {trial.number}] "
+        f"objective={objective_value:.4f}, "
+        f"excess_return={perf['mean_excess_return']:.4f}, "
+        f"win_rate={perf['win_rate']:.4f}, "
+        f"sharpe={perf['sharpe_ratio']:.4f}, "
+        f"num_portfolios={perf.get('num_portfolios', 0)}"
+    )
+    
     return objective_value
+
+
+class ProgressWindow:
+    """進捗表示用のポップアップウィンドウ"""
+    
+    def __init__(self, n_trials: int):
+        if not TKINTER_AVAILABLE:
+            self.root = None
+            return
+        
+        self.root = tk.Tk()
+        self.root.title("最適化進捗")
+        self.root.geometry("500x300")
+        self.root.resizable(False, False)
+        
+        # ラベル
+        self.label = tk.Label(
+            self.root,
+            text="最適化を実行中...",
+            font=("Arial", 12, "bold"),
+            pady=10
+        )
+        self.label.pack()
+        
+        # 進捗バー
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            self.root,
+            variable=self.progress_var,
+            maximum=n_trials,
+            length=400,
+            mode='determinate'
+        )
+        self.progress_bar.pack(pady=10)
+        
+        # 進捗テキスト
+        self.progress_text = tk.Label(
+            self.root,
+            text=f"試行: 0 / {n_trials}",
+            font=("Arial", 10)
+        )
+        self.progress_text.pack()
+        
+        # 最良値表示
+        self.best_value_label = tk.Label(
+            self.root,
+            text="最良値: -",
+            font=("Arial", 10)
+        )
+        self.best_value_label.pack(pady=5)
+        
+        # 現在の試行情報
+        self.current_trial_label = tk.Label(
+            self.root,
+            text="",
+            font=("Arial", 9),
+            fg="gray"
+        )
+        self.current_trial_label.pack(pady=5)
+        
+        # 経過時間
+        self.elapsed_time_label = tk.Label(
+            self.root,
+            text="経過時間: 0秒",
+            font=("Arial", 9),
+            fg="gray"
+        )
+        self.elapsed_time_label.pack(pady=5)
+        
+        self.n_trials = n_trials
+        self.current_trial = 0
+        self.best_value = None  # Noneで初期化（最初の値で更新）
+        self.start_time = time.time()
+        
+        # ウィンドウを更新
+        self.update_window()
+    
+    def update_window(self):
+        """ウィンドウを更新"""
+        if self.root is None:
+            return
+        
+        try:
+            # 経過時間を更新
+            elapsed = int(time.time() - self.start_time)
+            self.elapsed_time_label.config(text=f"経過時間: {elapsed}秒")
+            
+            # ウィンドウを更新
+            self.root.update()
+        except:
+            pass
+    
+    def update(self, trial_number: int, value: Optional[float] = None, params: Optional[Dict] = None):
+        """進捗を更新"""
+        if self.root is None:
+            return
+        
+        self.current_trial = trial_number
+        
+        # 進捗バーを更新
+        self.progress_var.set(trial_number)
+        
+        # 進捗テキストを更新
+        self.progress_text.config(text=f"試行: {trial_number} / {self.n_trials}")
+        
+        # 最良値を更新（値がNoneでない場合、かつ現在の最良値より良い場合）
+        if value is not None:
+            # Optunaは最大化を目指すので、値が大きいほど良い
+            if self.best_value is None or value > self.best_value:
+                self.best_value = value
+                print(f"[ProgressWindow] 最良値が更新されました: {self.best_value:.4f}")
+            # 常に最新の最良値を表示
+            if self.best_value is not None:
+                self.best_value_label.config(text=f"最良値: {self.best_value:.4f}")
+        
+        # 現在の試行情報を更新
+        if params:
+            param_str = ", ".join([f"{k}={v:.3f}" for k, v in list(params.items())[:3]])
+            if len(params) > 3:
+                param_str += "..."
+            self.current_trial_label.config(text=f"試行 {trial_number}: {param_str}")
+        
+        self.update_window()
+    
+    def close(self):
+        """ウィンドウを閉じる"""
+        if self.root is None:
+            return
+        
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except:
+            pass
+    
+    def run(self):
+        """ウィンドウを実行（別スレッドで）"""
+        if self.root is None:
+            return
+        
+        def _run():
+            self.root.mainloop()
+        
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
 
 
 def main(
@@ -558,6 +810,7 @@ def main(
     as_of_date: Optional[str] = None,
     study_name: Optional[str] = None,
     n_jobs: int = -1,
+    show_progress_window: bool = True,
 ):
     """
     メイン処理
@@ -576,7 +829,7 @@ def main(
     print(f"試行回数: {n_trials}")
     print(f"評価日: {as_of_date or '最新'}")
     if n_jobs == -1:
-        print(f"並列実行数: {max(1, mp.cpu_count() - 1)} (CPU数-1)")
+        print(f"並列実行数: {mp.cpu_count()} (CPU数、ポートフォリオ保存は一括化)")
     else:
         print(f"並列実行数: {n_jobs}")
     print("=" * 80)
@@ -604,6 +857,59 @@ def main(
         load_if_exists=True,
     )
     
+    # 進捗ウィンドウを作成
+    progress_window = None
+    if show_progress_window and TKINTER_AVAILABLE:
+        progress_window = ProgressWindow(n_trials)
+        progress_window.run()
+        print("進捗ウィンドウを表示しました")
+    
+    # コールバック関数
+    def callback(study: optuna.Study, trial: optuna.Trial):
+        """最適化の進捗を更新"""
+        if progress_window:
+            # 試行の値（完了している場合）
+            current_value = trial.value if trial.value is not None else None
+            # 最良値（堅牢化: ValueErrorをキャッチ）
+            best_value = None
+            try:
+                best_value = study.best_value
+            except ValueError:
+                # 完了trialが無い場合
+                if len(study.trials) > 0:
+                    completed_trials = [
+                        t for t in study.trials 
+                        if t.state == optuna.trial.TrialState.COMPLETE
+                    ]
+                    if completed_trials:
+                        best_trial = max(
+                            completed_trials,
+                            key=lambda t: t.value if t.value is not None else float('-inf')
+                        )
+                        best_value = best_trial.value if best_trial.value is not None else None
+            
+            params = trial.params if hasattr(trial, 'params') else None
+            
+            # デバッグ用ログ
+            try:
+                study_best = study.best_value
+            except ValueError:
+                study_best = 'N/A'
+            
+            print(
+                f"[Callback Trial {trial.number}] "
+                f"current_value={current_value}, "
+                f"best_value={best_value}, "
+                f"study.best_value={study_best}"
+            )
+            
+            # 最良値で更新
+            if best_value is not None:
+                progress_window.update(trial.number + 1, best_value, params)
+            elif current_value is not None:
+                # 試行が完了しているが最良値がまだない場合
+                progress_window.update(trial.number + 1, current_value, params)
+    
     # 最適化実行（並列化）
     print("最適化を開始します...")
     # Optunaの並列化はsamplerで制御（TPEは並列化に対応）
@@ -613,7 +919,12 @@ def main(
         n_trials=n_trials,
         show_progress_bar=True,
         n_jobs=1,  # Optunaの試行は逐次実行（各試行内でバックテストを並列化）
+        callbacks=[callback] if progress_window else None,
     )
+    
+    # 進捗ウィンドウを閉じる
+    if progress_window:
+        progress_window.close()
     
     # 結果表示
     print()
@@ -663,7 +974,8 @@ if __name__ == "__main__":
     parser.add_argument("--n-trials", type=int, default=50, help="試行回数")
     parser.add_argument("--as-of-date", type=str, default=None, help="評価日（YYYY-MM-DD）")
     parser.add_argument("--study-name", type=str, default=None, help="スタディ名")
-    parser.add_argument("--n-jobs", type=int, default=-1, help="並列実行数（-1でCPU数-1、1で逐次実行）")
+    parser.add_argument("--n-jobs", type=int, default=-1, help="並列実行数（-1でCPU数、1で逐次実行）")
+    parser.add_argument("--no-progress-window", action="store_true", help="進捗ウィンドウを表示しない")
     
     args = parser.parse_args()
     
@@ -674,5 +986,6 @@ if __name__ == "__main__":
         as_of_date=args.as_of_date,
         study_name=args.study_name,
         n_jobs=args.n_jobs,
+        show_progress_window=not args.no_progress_window,
     )
 
