@@ -109,11 +109,28 @@ def _split_multiplier_between(conn, code: str, start_date: str, end_date: str) -
     
     # 株数倍率を計算: split_mult = ∏(1 / adjustment_factor)
     mult = 1.0
+    invalid_factors = []
     for _, row in df.iterrows():
         adj_factor = row["adjustment_factor"]
-        # 念のためゼロ・異常値ガード
-        if pd.notna(adj_factor) and adj_factor > 0:
-            mult *= (1.0 / float(adj_factor))
+        split_date = row["date"]
+        
+        # 不正値の検出と警告
+        if pd.isna(adj_factor):
+            invalid_factors.append((split_date, "NULL"))
+            continue
+        
+        if adj_factor <= 0:
+            # 0や負の値はデータ不正（通常の分割データではあり得ない）
+            invalid_factors.append((split_date, f"invalid_value={adj_factor}"))
+            # 警告を出力（本番環境ではログに記録）
+            print(f"警告: 銘柄{code}の分割データに不正値があります。日付={split_date}, adjustment_factor={adj_factor}")
+            continue
+        
+        mult *= (1.0 / float(adj_factor))
+    
+    # 不正値があった場合は警告（ただし計算は続行）
+    if invalid_factors:
+        print(f"警告: 銘柄{code}で{len(invalid_factors)}件の不正なadjustment_factorを検出しました。無視して計算を続行します。")
     
     return mult
 
@@ -152,6 +169,8 @@ def calculate_portfolio_performance(
             }
         
         # 評価日を決定
+        # 重要: as_of_dateがNoneの場合は最新の価格データの日付を使用
+        #       これにより、SQLクエリでdate <= ?の部分でNoneが渡されることを防ぐ
         if as_of_date is None:
             latest_date_df = pd.read_sql_query(
                 "SELECT MAX(date) as max_date FROM prices_daily",
@@ -163,7 +182,11 @@ def calculate_portfolio_performance(
                     "as_of_date": None,
                     "error": "価格データが見つかりません",
                 }
-            as_of_date = latest_date_df["max_date"].iloc[0]
+            as_of_date = str(latest_date_df["max_date"].iloc[0])  # 文字列として保証
+        
+        # 型チェック: as_of_dateが文字列であることを保証（SQLクエリで使用するため）
+        if not isinstance(as_of_date, str):
+            as_of_date = str(as_of_date)
         
         # リバランス日の翌営業日を取得
         next_trading_day = _get_next_trading_day(conn, rebalance_date)
@@ -175,7 +198,10 @@ def calculate_portfolio_performance(
             }
         
         # 各銘柄のリバランス日の翌営業日の始値を取得（購入価格）
+        # 注意: 購入価格が取得できない銘柄はrebalance_priceがNaNになり、
+        #       後続のreturn_pct計算でNaNになる（欠損値として扱われる）
         rebalance_prices = []
+        missing_buy_prices = []
         for code in portfolio["code"]:
             price_row = pd.read_sql_query(
                 """
@@ -191,17 +217,33 @@ def calculate_portfolio_performance(
                     "code": code,
                     "rebalance_price": price_row["open"].iloc[0],
                 })
+            else:
+                missing_buy_prices.append(code)
+        
+        if missing_buy_prices:
+            print(
+                f"警告: {len(missing_buy_prices)}銘柄で購入価格が取得できませんでした。"
+                f"（銘柄コード: {missing_buy_prices[:5]}{'...' if len(missing_buy_prices) > 5 else ''}）"
+            )
         
         rebalance_prices_df = pd.DataFrame(rebalance_prices)
         portfolio = portfolio.merge(rebalance_prices_df, on="code", how="left")
         
         # 各銘柄の現在価格を取得（終値を使用）
+        # ========================================================================
+        # 重要: 評価日が非営業日のときのズレ問題を解決
+        # ========================================================================
+        # 実際に評価に使った価格の日付（effective_asof_date）を取得し、
+        # その日付までで分割を計算することで、価格と分割の基準日を必ず一致させる
+        # これにより、休場日にもcorporate action行が立つ実装でも正しく動作する
+        # ========================================================================
         current_prices = []
         split_multipliers = []
+        missing_sell_prices = []
         for code in portfolio["code"]:
             price_row = pd.read_sql_query(
                 """
-                SELECT close
+                SELECT date, close
                 FROM prices_daily
                 WHERE code = ? AND date <= ?
                 ORDER BY date DESC
@@ -211,17 +253,27 @@ def calculate_portfolio_performance(
                 params=(code, as_of_date),
             )
             if not price_row.empty and price_row["close"].iloc[0] is not None:
+                effective_asof_date = str(price_row["date"].iloc[0])  # 実際に評価に使った価格の日付
                 current_prices.append({
                     "code": code,
                     "current_price": price_row["close"].iloc[0],
                 })
                 # リバランス日の翌営業日以後の分割倍率を計算
-                # 注: 翌営業日以降の分割を考慮するため、next_trading_dayを使用
-                split_mult = _split_multiplier_between(conn, code, next_trading_day, as_of_date)
+                # 重要: effective_asof_dateまでで計算することで、価格と分割の基準日を一致させる
+                # これにより、評価日が非営業日でも、価格と分割の基準日が必ず一致する
+                split_mult = _split_multiplier_between(conn, code, next_trading_day, effective_asof_date)
                 split_multipliers.append({
                     "code": code,
                     "split_multiplier": split_mult,
                 })
+            else:
+                missing_sell_prices.append(code)
+        
+        if missing_sell_prices:
+            print(
+                f"警告: {len(missing_sell_prices)}銘柄で評価価格が取得できませんでした。"
+                f"（銘柄コード: {missing_sell_prices[:5]}{'...' if len(missing_sell_prices) > 5 else ''}）"
+            )
         
         current_prices_df = pd.DataFrame(current_prices)
         portfolio = portfolio.merge(current_prices_df, on="code", how="left")
@@ -246,12 +298,54 @@ def calculate_portfolio_performance(
         )
         
         # ポートフォリオ全体の損益を計算（weightを考慮）
+        # ========================================================================
+        # 重要: 欠損値の扱いを明示的に処理
+        # ========================================================================
+        # 欠損値の扱い方針: 方針C（品質管理）
+        # - 欠損銘柄（return_pctがNaN）は計算から除外される
+        # - 有効銘柄のweight合計（coverage）を計算し、品質指標として返す
+        # - 全部NaNの場合はtotal_returnもNaNを返す（sum(min_count=1)を使用）
+        # - 呼び出し側でweight_coverageを確認し、品質を判断できる
+        # ========================================================================
+        
         portfolio["weighted_return"] = portfolio["weight"] * portfolio["return_pct"]
-        total_return = portfolio["weighted_return"].sum()
+        
+        # 有効銘柄（return_pctがNaNでない）のweight合計を計算（coverage）
+        valid_mask = portfolio["return_pct"].notna()
+        valid_weight_sum = portfolio.loc[valid_mask, "weight"].sum()
+        total_weight = portfolio["weight"].sum()
+        num_valid = valid_mask.sum()
+        num_total = len(portfolio)
+        
+        if total_weight > 0:
+            coverage = valid_weight_sum / total_weight
+        else:
+            coverage = 0.0
+        
+        # sum(min_count=1)を使用: 全部NaNならNaNを維持（誤った0%を防ぐ）
+        total_return = portfolio["weighted_return"].sum(min_count=1)
+        
+        # 欠損値の警告（品質管理）
+        MIN_COVERAGE = 0.98  # 98%以上のweightが有効でないと警告
+        if coverage < MIN_COVERAGE:
+            missing_count = num_total - num_valid
+            missing_weight = total_weight - valid_weight_sum
+            print(
+                f"警告: ポートフォリオの品質が低い可能性があります。"
+                f"欠損銘柄数={missing_count}/{num_total}, "
+                f"欠損weight={missing_weight:.4f}/{total_weight:.4f}, "
+                f"coverage={coverage:.4f}"
+            )
         
         # TOPIX比較: 購入日と評価日のTOPIX価格を取得
+        # ========================================================================
+        # 重要: 個別株と同じタイミングを使用することで、公平な比較を実現
+        # ========================================================================
         # 購入: リバランス日の翌営業日の始値（個別株と同様）
         # 売却: as_of_dateの直近営業日の終値（個別株と同様）
+        # 注意: _get_topix_priceは個別株と同じく「date <= ? ORDER BY date DESC LIMIT 1」で
+        #       直近営業日の価格を取得するため、非営業日・欠損時の挙動が一致している
+        # ========================================================================
         topix_buy_price = _get_topix_price(conn, next_trading_day, use_open=True)
         topix_sell_price = _get_topix_price(conn, as_of_date, use_open=False)
         
@@ -305,6 +399,8 @@ def calculate_portfolio_performance(
             "total_return_pct": float(total_return) if not pd.isna(total_return) else None,
             "num_stocks": len(portfolio),
             "num_stocks_with_price": len(portfolio[portfolio["current_price"].notna()]),
+            "num_stocks_with_return": len(valid_returns),  # 有効なリターンがある銘柄数
+            "weight_coverage": float(coverage) if total_weight > 0 else None,  # 有効weight割合（品質指標）
             "avg_return_pct": float(valid_returns.mean()) if len(valid_returns) > 0 else None,
             "min_return_pct": float(valid_returns.min()) if len(valid_returns) > 0 else None,
             "max_return_pct": float(valid_returns.max()) if len(valid_returns) > 0 else None,
@@ -370,6 +466,8 @@ def save_performance_to_db(
             "total_return_pct": performance.get("total_return_pct"),
             "num_stocks": performance.get("num_stocks"),
             "num_stocks_with_price": performance.get("num_stocks_with_price"),
+            "num_stocks_with_return": performance.get("num_stocks_with_return"),  # 新規追加
+            "weight_coverage": performance.get("weight_coverage"),  # 新規追加
             "avg_return_pct": performance.get("avg_return_pct"),
             "min_return_pct": performance.get("min_return_pct"),
             "max_return_pct": performance.get("max_return_pct"),

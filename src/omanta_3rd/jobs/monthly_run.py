@@ -143,13 +143,15 @@ def _entry_score(close: pd.Series) -> float:
         rsi_score = np.nan
 
         if not pd.isna(z):
-            # z=-3のとき1、z=0のとき0になる線形変換（クリップなし）
-            # 計算式: (z - 0) / (-3 - 0) = -z / 3
-            bb_score = -z / 3.0
+            # z=0のとき0、z=3のとき1になる線形変換（クリップなし）
+            # 計算式: (z - 0) / (3 - 0) = z / 3
+            # 順張り: 上位バンドより上（zが高い）ほど高スコア
+            bb_score = z / 3.0
         if not pd.isna(rsi):
-            # RSI=20のとき1、RSI=50のとき0になる線形変換（クリップなし）
-            # 計算式: (RSI - 50) / (20 - 50) = (50 - RSI) / 30
-            rsi_score = (50.0 - rsi) / 30.0
+            # RSI=50のとき0、RSI=80のとき1になる線形変換（クリップなし）
+            # 計算式: (RSI - 50) / (80 - 50) = (RSI - 50) / 30
+            # 順張り: RSIが高い（強気）ほど高スコア
+            rsi_score = (rsi - 50.0) / 30.0
 
         if not pd.isna(bb_score) and not pd.isna(rsi_score):
             scores.append(0.5 * bb_score + 0.5 * rsi_score)
