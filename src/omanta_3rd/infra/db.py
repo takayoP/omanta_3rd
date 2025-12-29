@@ -19,15 +19,23 @@ def connect_db(read_only: bool = False):
     mode = "ro" if read_only else "rwc"
     uri = f"file:{DB_PATH}?mode={mode}"
     
-    conn = sqlite3.connect(uri, uri=True)
+    conn = sqlite3.connect(uri, uri=True, timeout=30.0)  # タイムアウトを30秒に設定
     conn.row_factory = sqlite3.Row
     
     try:
-        # WALモードとPRAGMA設定
+        # WALモードとPRAGMA設定（並列読み取り性能向上）
         if not read_only:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA synchronous=NORMAL")
+        else:
+            # 読み取り専用接続でも最適化設定
+            conn.execute("PRAGMA journal_mode=WAL")  # WALモードは読み取り専用でも有効
+        
+        # 並列読み取り性能向上のための設定
+        conn.execute("PRAGMA cache_size=-64000")  # 64MBキャッシュ（負の値はKB単位）
+        conn.execute("PRAGMA temp_store=MEMORY")  # 一時データをメモリに保存
+        conn.execute("PRAGMA mmap_size=268435456")  # 256MBのメモリマッピング
         
         yield conn
         conn.commit()

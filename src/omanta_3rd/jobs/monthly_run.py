@@ -34,26 +34,34 @@ class StrategyParams:
     target_max: int = 30
     pool_size: int = 80
 
-    # Hard filters
-    roe_min: float = 0.10
-    liquidity_quantile_cut: float = 0.20  # drop bottom 20% by liquidity_60d
+    # Hard filters（最適化結果を適用: 2025-12-29）
+    roe_min: float = 0.0711  # 最適化結果: 0.0711（7.11%）
+    liquidity_quantile_cut: float = 0.2642  # 最適化結果: 0.2642（26.42%）
 
     # Sector cap (33-sector)
     sector_cap: int = 4
 
-    # Scoring weights
-    w_quality: float = 0.35
-    w_value: float = 0.25
-    w_growth: float = 0.15
-    w_record_high: float = 0.15
-    w_size: float = 0.10
+    # Scoring weights（最適化結果を適用: 2025-12-29）
+    w_quality: float = 0.2245  # 最適化結果: 0.2245（22.45%）
+    w_value: float = 0.3008   # 最適化結果: 0.3008（30.08%）← 最も重要
+    w_growth: float = 0.1006  # 最適化結果: 0.1006（10.06%）
+    w_record_high: float = 0.0609  # 最適化結果: 0.0609（6.09%）
+    w_size: float = 0.1604    # 最適化結果: 0.1604（16.04%）
 
-    # Value mix
-    w_forward_per: float = 0.5
-    w_pbr: float = 0.5
+    # Value mix（最適化結果を適用: 2025-12-29）
+    w_forward_per: float = 0.4825  # 最適化結果: 0.4825（48.25%）
+    w_pbr: float = 0.5175  # 最適化結果: 0.5175（51.75% = 1.0 - 0.4825）
 
     # Entry score (BB/RSI)
     use_entry_score: bool = True
+    
+    # Entry score parameters（最適化結果を適用: 2025-12-29）
+    rsi_base: float = 44.64  # 最適化結果: 44.64
+    rsi_max: float = 78.72   # 最適化結果: 78.72
+    bb_z_base: float = -1.41  # 最適化結果: -1.41
+    bb_z_max: float = 2.50    # 最適化結果: 2.50
+    bb_weight: float = 0.62   # 最適化結果: 0.62（62%）
+    rsi_weight: float = 0.38  # 最適化結果: 0.38（38% = 1.0 - 0.62）
 
 
 PARAMS = StrategyParams()
@@ -134,6 +142,14 @@ def _bb_zscore(close: pd.Series, n: int) -> float:
 
 
 def _entry_score(close: pd.Series) -> float:
+    """
+    Entry score計算（最適化結果のパラメータを使用）
+    
+    最適化結果（2025-12-29）:
+    - rsi_base: 44.64, rsi_max: 78.72
+    - bb_z_base: -1.41, bb_z_max: 2.50
+    - bb_weight: 0.62, rsi_weight: 0.38
+    """
     scores = []
     for n in (20, 60, 90):
         z = _bb_zscore(close, n)
@@ -143,22 +159,43 @@ def _entry_score(close: pd.Series) -> float:
         rsi_score = np.nan
 
         if not pd.isna(z):
-            # z=0のとき0、z=3のとき1になる線形変換（クリップなし）
-            # 計算式: (z - 0) / (3 - 0) = z / 3
-            # 順張り: 上位バンドより上（zが高い）ほど高スコア
-            bb_score = z / 3.0
+            # 最適化結果のパラメータを使用
+            # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
+            bb_z_base = PARAMS.bb_z_base
+            bb_z_max = PARAMS.bb_z_max
+            if bb_z_max != bb_z_base:
+                bb_score = (z - bb_z_base) / (bb_z_max - bb_z_base)
+            else:
+                bb_score = 0.0
+            # クリップ処理（0〜1に制限）
+            bb_score = np.clip(bb_score, 0.0, 1.0)
+                
         if not pd.isna(rsi):
-            # RSI=50のとき0、RSI=80のとき1になる線形変換（クリップなし）
-            # 計算式: (RSI - 50) / (80 - 50) = (RSI - 50) / 30
-            # 順張り: RSIが高い（強気）ほど高スコア
-            rsi_score = (rsi - 50.0) / 30.0
+            # 最適化結果のパラメータを使用
+            # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
+            rsi_base = PARAMS.rsi_base
+            rsi_max = PARAMS.rsi_max
+            if rsi_max != rsi_base:
+                rsi_score = (rsi - rsi_base) / (rsi_max - rsi_base)
+            else:
+                rsi_score = 0.0
+            # クリップ処理（0〜1に制限）
+            rsi_score = np.clip(rsi_score, 0.0, 1.0)
 
-        if not pd.isna(bb_score) and not pd.isna(rsi_score):
-            scores.append(0.5 * bb_score + 0.5 * rsi_score)
-        elif not pd.isna(bb_score):
-            scores.append(bb_score)
-        elif not pd.isna(rsi_score):
-            scores.append(rsi_score)
+        # 最適化結果の重みを使用
+        bb_weight = PARAMS.bb_weight
+        rsi_weight = PARAMS.rsi_weight
+        total_weight = bb_weight + rsi_weight
+        
+        if total_weight > 0:
+            if not pd.isna(bb_score) and not pd.isna(rsi_score):
+                scores.append(
+                    (bb_weight * bb_score + rsi_weight * rsi_score) / total_weight
+                )
+            elif not pd.isna(bb_score):
+                scores.append(bb_score)
+            elif not pd.isna(rsi_score):
+                scores.append(rsi_score)
 
     if not scores:
         return np.nan
@@ -574,6 +611,15 @@ def _snap_listed_date(conn, asof: str) -> str:
 
 
 def _load_universe(conn, listed_date: str) -> pd.DataFrame:
+    """
+    プライム市場（旧：東証一部）の銘柄を取得
+    
+    市場区分の変遷:
+    - 2022年4月以前: 「東証一部」「東証二部」「マザーズ」など
+    - 2022年4月以降: 「プライム」「スタンダード」「グロース」など
+    
+    プライム市場 = 「プライム」「Prime」「東証一部」
+    """
     df = pd.read_sql_query(
         """
         SELECT code, company_name, market_name, sector17, sector33
@@ -583,8 +629,14 @@ def _load_universe(conn, listed_date: str) -> pd.DataFrame:
         conn,
         params=(listed_date,),
     )
-    # Prime only (表記ゆれ耐性)
-    df = df[df["market_name"].astype(str).str.contains("プライム|Prime", na=False)].copy()
+    # Prime market (旧区分も含む: プライム、Prime、東証一部)
+    # 表記ゆれ耐性: 大文字小文字を区別しない
+    market_name_series = df["market_name"].astype(str)
+    is_prime = (
+        market_name_series.str.contains("プライム|Prime", case=False, na=False) |
+        market_name_series.str.contains("東証一部", na=False)
+    )
+    df = df[is_prime].copy()
     return df
 
 

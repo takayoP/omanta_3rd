@@ -48,9 +48,28 @@ def select_portfolio(
         params.append(config.max_pbr)
     
     if config.target_markets:
-        placeholders = ",".join(["?"] * len(config.target_markets))
+        # 旧区分を新区分にマッピング
+        # プライム市場 = 「プライム」「Prime」「東証一部」
+        # スタンダード市場 = 「スタンダード」「東証二部」
+        # グロース市場 = 「グロース」「マザーズ」
+        market_mapping = {
+            "プライム": ["プライム", "Prime", "prime", "東証一部"],
+            "スタンダード": ["スタンダード", "Standard", "standard", "東証二部"],
+            "グロース": ["グロース", "Growth", "growth", "マザーズ"],
+        }
+        
+        # 指定された市場区分に対応する全ての表記（旧区分含む）を取得
+        allowed_markets = set()
+        for target_market in config.target_markets:
+            if target_market in market_mapping:
+                allowed_markets.update(market_mapping[target_market])
+            else:
+                # マッピングにない場合はそのまま追加（カスタム市場名対応）
+                allowed_markets.add(target_market)
+        
+        placeholders = ",".join(["?"] * len(allowed_markets))
         sql += f" AND li.market_name IN ({placeholders})"
-        params.extend(config.target_markets)
+        params.extend(list(allowed_markets))
     
     sql += " ORDER BY fm.core_score DESC, fm.entry_score DESC"
     

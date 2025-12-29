@@ -12,7 +12,13 @@ def is_prime_market(
     date: str,
 ) -> bool:
     """
-    プライム市場かどうかを判定
+    プライム市場（旧：東証一部）かどうかを判定
+    
+    市場区分の変遷:
+    - 2022年4月以前: 「東証一部」「東証二部」「マザーズ」など
+    - 2022年4月以降: 「プライム」「スタンダード」「グロース」など
+    
+    プライム市場 = 「プライム」「Prime」「東証一部」
     
     Args:
         conn: データベース接続
@@ -20,21 +26,28 @@ def is_prime_market(
         date: 基準日（YYYY-MM-DD）
         
     Returns:
-        プライム市場の場合True
+        プライム市場（旧：東証一部）の場合True
     """
     sql = """
         SELECT market_name
         FROM listed_info
-        WHERE code = ? AND date = ?
+        WHERE code = ? AND date <= ?
         ORDER BY date DESC
         LIMIT 1
     """
     row = conn.execute(sql, (code, date)).fetchone()
     
-    if not row:
+    if not row or not row["market_name"]:
         return False
     
-    return row["market_name"] == "プライム"
+    market_name = str(row["market_name"]).strip()
+    
+    # プライム市場の判定（旧区分も含む）
+    return (
+        market_name == "プライム" or
+        market_name.lower() == "prime" or
+        market_name == "東証一部"
+    )
 
 
 def calculate_liquidity_60d(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass, replace, fields
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
@@ -370,6 +371,29 @@ def _run_single_backtest(
         import traceback
         traceback.print_exc()
         return None
+def _calculate_performance_single(
+    rebalance_date: str,
+    as_of_date: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """
+    単一のリバランス日に対するパフォーマンス計算（並列化用）
+    
+    Args:
+        rebalance_date: リバランス日
+        as_of_date: 評価日
+    
+    Returns:
+        パフォーマンス結果（エラー時はNone）
+    """
+    try:
+        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
+        if perf is not None and isinstance(perf, dict) and "error" not in perf:
+            return perf
+    except Exception as e:
+        print(f"パフォーマンス計算エラー ({rebalance_date}): {e}")
+    return None
+
+
 def _run_single_backtest_portfolio_only(
     rebalance_date: str,
     strategy_params_dict: dict,
@@ -454,9 +478,11 @@ def run_backtest_for_optimization(
         for field in fields(EntryScoreParams)
     }
     
-    # 並列実行数の決定
+    # 並列実行数の決定（タスク数とCPU数のバランスを考慮）
     if n_jobs == -1:
-        n_jobs = mp.cpu_count()
+        # タスク数が少ない場合は、タスク数に合わせる
+        # タスク数が多い場合は、CPU数を上限とする
+        n_jobs = min(len(rebalance_dates), mp.cpu_count())
     elif n_jobs <= 0:
         n_jobs = 1
     
@@ -506,12 +532,25 @@ def run_backtest_for_optimization(
         for rebalance_date, portfolio_df in portfolios.items():
             save_portfolio(conn, portfolio_df)
     
-    # パフォーマンスを計算（保存後に実行）
+    # パフォーマンスを計算（保存後に実行、並列化可能）
     results = []
-    for rebalance_date in portfolios.keys():
-        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
-        if perf is not None and isinstance(perf, dict) and "error" not in perf:
-            results.append(perf)
+    if n_jobs > 1 and len(portfolios) > 1:
+        # パフォーマンス計算も並列化（読み取り専用なので安全）
+        with ProcessPoolExecutor(max_workers=min(n_jobs, len(portfolios))) as executor:
+            futures = {
+                executor.submit(_calculate_performance_single, rebalance_date, as_of_date): rebalance_date
+                for rebalance_date in portfolios.keys()
+            }
+            for future in as_completed(futures):
+                perf = future.result()
+                if perf is not None:
+                    results.append(perf)
+    else:
+        # 逐次実行
+        for rebalance_date in portfolios.keys():
+            perf = calculate_portfolio_performance(rebalance_date, as_of_date)
+            if perf is not None and isinstance(perf, dict) and "error" not in perf:
+                results.append(perf)
     
     if not results:
         raise RuntimeError(
@@ -575,12 +614,13 @@ def objective(
     Returns:
         最適化対象の値（平均超過リターン）
     """
-    # StrategyParamsのパラメータ
-    w_quality = trial.suggest_float("w_quality", 0.2, 0.5)
-    w_value = trial.suggest_float("w_value", 0.15, 0.35)
-    w_growth = trial.suggest_float("w_growth", 0.1, 0.25)
-    w_record_high = trial.suggest_float("w_record_high", 0.05, 0.25)
-    w_size = trial.suggest_float("w_size", 0.05, 0.2)
+    # StrategyParamsのパラメータ（前回の最適化結果を踏まえて範囲を調整）
+    # 前回の最適値: w_quality=0.2245, w_value=0.3008, w_growth=0.1006, w_record_high=0.0609, w_size=0.1604
+    w_quality = trial.suggest_float("w_quality", 0.15, 0.35)
+    w_value = trial.suggest_float("w_value", 0.20, 0.40)
+    w_growth = trial.suggest_float("w_growth", 0.05, 0.20)
+    w_record_high = trial.suggest_float("w_record_high", 0.03, 0.15)
+    w_size = trial.suggest_float("w_size", 0.10, 0.25)
     
     # 正規化（合計が1になるように）
     total = w_quality + w_value + w_growth + w_record_high + w_size
@@ -590,16 +630,21 @@ def objective(
     w_record_high /= total
     w_size /= total
     
-    w_forward_per = trial.suggest_float("w_forward_per", 0.3, 0.7)
+    # 前回の最適値: w_forward_per=0.4825
+    w_forward_per = trial.suggest_float("w_forward_per", 0.35, 0.65)
     w_pbr = 1.0 - w_forward_per
     
-    roe_min = trial.suggest_float("roe_min", 0.05, 0.15)
-    liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.1, 0.3)
+    # 前回の最適値: roe_min=0.0711, liquidity_quantile_cut=0.2642
+    roe_min = trial.suggest_float("roe_min", 0.05, 0.12)
+    liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.15, 0.35)
     
     # StrategyParamsはfrozenなので、replaceを使用
+    # ポートフォリオ銘柄数を12に設定
     default_params = StrategyParams()
     strategy_params = replace(
         default_params,
+        target_min=12,
+        target_max=12,
         w_quality=w_quality,
         w_value=w_value,
         w_growth=w_growth,
@@ -615,13 +660,14 @@ def objective(
     # 順張り: RSIが高いほど、BB Z-scoreが高いほど高スコア
     # BB Z-scoreはボリンジャーバンドのシグマ（標準偏差の倍数）を表す
     # Z-score = 0: 移動平均、Z-score = ±1: ±1シグマ、Z-score = ±2: ±2シグマ
-    rsi_base = trial.suggest_float("rsi_base", 30.0, 70.0)  # 基準値: 30-70
+    # 前回の最適値: rsi_base=44.6, rsi_max=78.7, bb_z_base=-1.41, bb_z_max=2.50, bb_weight=0.6233
+    rsi_base = trial.suggest_float("rsi_base", 35.0, 60.0)  # 基準値: 35-60（前回44.6を中心に）
     # rsi_maxはrsi_baseより大きい必要がある（制約付きサンプリング）
-    rsi_max = trial.suggest_float("rsi_max", max(70.0, rsi_base + 5.0), 90.0)  # 上限: rsi_base+5以上、90以下
-    bb_z_base = trial.suggest_float("bb_z_base", -2.0, 2.0)  # 基準値: -2～2シグマ
+    rsi_max = trial.suggest_float("rsi_max", max(70.0, rsi_base + 5.0), 85.0)  # 上限: rsi_base+5以上、85以下（前回78.7を中心に）
+    bb_z_base = trial.suggest_float("bb_z_base", -2.0, 0.0)  # 基準値: -2～0シグマ（前回-1.41を中心に）
     # bb_z_maxはbb_z_baseより大きい必要がある（制約付きサンプリング）
-    bb_z_max = trial.suggest_float("bb_z_max", max(2.0, bb_z_base + 0.5), 4.0)  # 上限: bb_z_base+0.5以上、4以下
-    bb_weight = trial.suggest_float("bb_weight", 0.2, 0.8)
+    bb_z_max = trial.suggest_float("bb_z_max", max(2.0, bb_z_base + 0.5), 3.5)  # 上限: bb_z_base+0.5以上、3.5以下（前回2.50を中心に）
+    bb_weight = trial.suggest_float("bb_weight", 0.45, 0.75)  # 前回0.6233を中心に
     rsi_weight = 1.0 - bb_weight
     
     entry_params = EntryScoreParams(
@@ -796,11 +842,37 @@ class ProgressWindow:
         if self.root is None:
             return
         
-        def _run():
-            self.root.mainloop()
+        # Windows環境では、mainloop()の代わりに定期的にupdate()を呼び出す
+        def _update_loop():
+            while self.root is not None:
+                try:
+                    if sys.platform == 'win32':
+                        # Windowsでは、update()を定期的に呼び出す
+                        self.root.update()
+                        time.sleep(0.1)  # 100msごとに更新
+                    else:
+                        # その他のOSでは、mainloop()を使用
+                        self.root.mainloop()
+                        break
+                except Exception as e:
+                    # ウィンドウが閉じられた場合など
+                    break
         
-        thread = threading.Thread(target=_run, daemon=True)
+        thread = threading.Thread(target=_update_loop, daemon=True)
         thread.start()
+        
+        # Windows環境では、定期的にupdate()を呼び出す
+        if sys.platform == 'win32':
+            def _update_loop():
+                while self.root is not None:
+                    try:
+                        self.root.update()
+                        time.sleep(0.1)  # 100msごとに更新
+                    except:
+                        break
+            
+            update_thread = threading.Thread(target=_update_loop, daemon=True)
+            update_thread.start()
 
 
 def main(
@@ -954,8 +1026,9 @@ def main(
         )
     print(f"結果を {result_file} に保存しました")
     
-    # 可視化（オプション）
+    # 可視化（オプション、plotlyが必要）
     try:
+        import plotly
         fig1 = plot_optimization_history(study)
         fig1.write_image(f"optimization_history_{study_name}.png")
         print(f"最適化履歴を optimization_history_{study_name}.png に保存しました")
@@ -963,6 +1036,8 @@ def main(
         fig2 = plot_param_importances(study)
         fig2.write_image(f"param_importances_{study_name}.png")
         print(f"パラメータ重要度を param_importances_{study_name}.png に保存しました")
+    except ImportError:
+        print("可視化にはplotlyが必要です。インストールする場合は: pip install plotly kaleido")
     except Exception as e:
         print(f"可視化の保存でエラー: {e}")
 
