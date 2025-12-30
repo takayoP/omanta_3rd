@@ -30,38 +30,38 @@ from ..infra.db import connect_db, upsert
 
 @dataclass(frozen=True)
 class StrategyParams:
-    target_min: int = 20
-    target_max: int = 30
+    target_min: int = 12  # 最適化結果: 12銘柄ポートフォリオ
+    target_max: int = 12  # 最適化結果: 12銘柄ポートフォリオ
     pool_size: int = 80
 
-    # Hard filters（最適化結果を適用: 2025-12-29）
-    roe_min: float = 0.0711  # 最適化結果: 0.0711（7.11%）
-    liquidity_quantile_cut: float = 0.2642  # 最適化結果: 0.2642（26.42%）
+    # Hard filters（最適化結果を適用: 2025-12-29 21:23）
+    roe_min: float = 0.0621  # 最適化結果: 0.0621（6.21%）
+    liquidity_quantile_cut: float = 0.1509  # 最適化結果: 0.1509（15.09%）
 
     # Sector cap (33-sector)
     sector_cap: int = 4
 
-    # Scoring weights（最適化結果を適用: 2025-12-29）
-    w_quality: float = 0.2245  # 最適化結果: 0.2245（22.45%）
-    w_value: float = 0.3008   # 最適化結果: 0.3008（30.08%）← 最も重要
-    w_growth: float = 0.1006  # 最適化結果: 0.1006（10.06%）
-    w_record_high: float = 0.0609  # 最適化結果: 0.0609（6.09%）
-    w_size: float = 0.1604    # 最適化結果: 0.1604（16.04%）
+    # Scoring weights（最適化結果を適用: 2025-12-29 21:23）
+    w_quality: float = 0.1519  # 最適化結果: 0.1519（15.19%）
+    w_value: float = 0.3908   # 最適化結果: 0.3908（39.08%）← 最も重要
+    w_growth: float = 0.1120  # 最適化結果: 0.1120（11.20%）
+    w_record_high: float = 0.0364  # 最適化結果: 0.0364（3.64%）
+    w_size: float = 0.2448    # 最適化結果: 0.2448（24.48%）
 
-    # Value mix（最適化結果を適用: 2025-12-29）
-    w_forward_per: float = 0.4825  # 最適化結果: 0.4825（48.25%）
-    w_pbr: float = 0.5175  # 最適化結果: 0.5175（51.75% = 1.0 - 0.4825）
+    # Value mix（最適化結果を適用: 2025-12-29 21:23）
+    w_forward_per: float = 0.4977  # 最適化結果: 0.4977（49.77%）
+    w_pbr: float = 0.5023  # 最適化結果: 0.5023（50.23% = 1.0 - 0.4977）
 
     # Entry score (BB/RSI)
     use_entry_score: bool = True
     
-    # Entry score parameters（最適化結果を適用: 2025-12-29）
-    rsi_base: float = 44.64  # 最適化結果: 44.64
-    rsi_max: float = 78.72   # 最適化結果: 78.72
-    bb_z_base: float = -1.41  # 最適化結果: -1.41
-    bb_z_max: float = 2.50    # 最適化結果: 2.50
-    bb_weight: float = 0.62   # 最適化結果: 0.62（62%）
-    rsi_weight: float = 0.38  # 最適化結果: 0.38（38% = 1.0 - 0.62）
+    # Entry score parameters（最適化結果を適用: 2025-12-29 21:23）
+    rsi_base: float = 51.18  # 最適化結果: 51.1777
+    rsi_max: float = 73.58   # 最適化結果: 73.5846
+    bb_z_base: float = -0.57  # 最適化結果: -0.5709
+    bb_z_max: float = 2.16    # 最適化結果: 2.1630
+    bb_weight: float = 0.5527   # 最適化結果: 0.5527（55.27%）
+    rsi_weight: float = 0.4473  # 最適化結果: 0.4473（44.73% = 1.0 - 0.5527）
 
 
 PARAMS = StrategyParams()
@@ -145,10 +145,10 @@ def _entry_score(close: pd.Series) -> float:
     """
     Entry score計算（最適化結果のパラメータを使用）
     
-    最適化結果（2025-12-29）:
-    - rsi_base: 44.64, rsi_max: 78.72
-    - bb_z_base: -1.41, bb_z_max: 2.50
-    - bb_weight: 0.62, rsi_weight: 0.38
+    最適化結果（2025-12-29 21:23）:
+    - rsi_base: 51.18, rsi_max: 73.58
+    - bb_z_base: -0.57, bb_z_max: 2.16
+    - bb_weight: 0.5527, rsi_weight: 0.4473
     """
     scores = []
     for n in (20, 60, 90):

@@ -1012,12 +1012,44 @@ def main(
     print()
     
     # 結果をJSONに保存
+    # 注意: study.best_paramsは正規化前の値なので、正規化後の値を計算
+    best_params_raw = study.best_params.copy()
+    
+    # Core Score重みの正規化
+    w_quality = best_params_raw.get("w_quality", 0.0)
+    w_value = best_params_raw.get("w_value", 0.0)
+    w_growth = best_params_raw.get("w_growth", 0.0)
+    w_record_high = best_params_raw.get("w_record_high", 0.0)
+    w_size = best_params_raw.get("w_size", 0.0)
+    total = w_quality + w_value + w_growth + w_record_high + w_size
+    if total > 0:
+        w_quality_norm = w_quality / total
+        w_value_norm = w_value / total
+        w_growth_norm = w_growth / total
+        w_record_high_norm = w_record_high / total
+        w_size_norm = w_size / total
+    else:
+        w_quality_norm = w_quality
+        w_value_norm = w_value
+        w_growth_norm = w_growth
+        w_record_high_norm = w_record_high
+        w_size_norm = w_size
+    
+    # 正規化後のパラメータを作成
+    best_params_normalized = best_params_raw.copy()
+    best_params_normalized["w_quality"] = w_quality_norm
+    best_params_normalized["w_value"] = w_value_norm
+    best_params_normalized["w_growth"] = w_growth_norm
+    best_params_normalized["w_record_high"] = w_record_high_norm
+    best_params_normalized["w_size"] = w_size_norm
+    
     result_file = f"optimization_result_{study_name}.json"
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "best_value": study.best_value,
-                "best_params": study.best_params,
+                "best_params": best_params_normalized,  # 正規化後の値を保存
+                "best_params_raw": best_params_raw,  # 正規化前の値も保存（参考用）
                 "n_trials": n_trials,
             },
             f,
