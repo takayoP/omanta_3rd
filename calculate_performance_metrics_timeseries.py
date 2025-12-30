@@ -125,7 +125,7 @@ def calculate_performance_metrics_timeseries(
         use_excess=True,
         monthly_excess_returns=monthly_excess_returns,
     )
-    profit_factor = calculate_profit_factor_timeseries(monthly_returns)
+    profit_factor = calculate_profit_factor_timeseries(monthly_returns, equity_curve)
     
     # 結果をまとめる
     result = {

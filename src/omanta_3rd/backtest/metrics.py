@@ -81,15 +81,22 @@ def calculate_sortino_ratio(
     monthly_excess_returns: Optional[List[float]] = None,
     risk_free_rate: float = 0.0,
     annualize: bool = True,
+    target: float = 0.0,
 ) -> Optional[float]:
     """
-    ソルティノレシオを計算
+    ソルティノレシオを計算（標準定義）
+    
+    【標準定義】
+    - downside = min(0, r - target) を全期間に適用
+    - downside_dev = sqrt(mean(downside^2))
+    - Sortino = (mean(r) - target) / downside_dev
     
     Args:
         monthly_returns: 月次リターンのリスト（小数）
         monthly_excess_returns: 月次超過リターンのリスト（小数、Noneの場合はmonthly_returnsを使用）
         risk_free_rate: リスクフリーレート（年率、小数、デフォルト: 0.0）
         annualize: 年率化するかどうか
+        target: 目標リターン（月次、小数、デフォルト: 0.0）
     
     Returns:
         ソルティノレシオ（None if 計算不可）
@@ -104,23 +111,22 @@ def calculate_sortino_ratio(
     
     mean_return = np.mean(returns_array)
     
-    # 下方リスク（負のリターンのみの標準偏差）
-    negative_returns = returns_array[returns_array < 0]
+    # 下方リスク（標準定義）
+    # downside = min(0, r - target) を全期間に適用
+    downside = np.minimum(0.0, returns_array - target)
     
-    if len(negative_returns) == 0:
-        # 負のリターンがない場合
-        if mean_return > risk_free_rate / 12.0:
-            return None  # または非常に大きな値（999.0など）
+    # downside_dev = sqrt(mean(downside^2))
+    downside_dev = np.sqrt(np.mean(downside ** 2))
+    
+    if downside_dev == 0:
+        # 下方偏差が0の場合（すべてのリターンがtarget以上）
+        if mean_return > target:
+            return None  # 計算不可（無限大に近い）
         else:
-            return None
-    
-    downside_std = np.std(negative_returns, ddof=1)
-    
-    if downside_std == 0:
-        return None
+            return None  # 計算不可
     
     # 月次リターンから計算
-    sortino = (mean_return - risk_free_rate / 12.0) / downside_std
+    sortino = (mean_return - target) / downside_dev
     
     # 年率化
     if annualize:
@@ -165,12 +171,21 @@ def calculate_calmar_ratio(
     return annual_return / max_dd
 
 
-def calculate_profit_factor_timeseries(monthly_returns: List[float]) -> Optional[float]:
+def calculate_profit_factor_timeseries(
+    monthly_returns: List[float],
+    equity_curve: Optional[List[float]] = None,
+) -> Optional[float]:
     """
-    プロフィットファクタを計算（時系列リターンから）
+    プロフィットファクタを計算（時系列リターンから、標準定義）
+    
+    【標準定義】
+    - pnl_t = equity_{t-1} * r_t（通貨建て損益）
+    - PF = sum(pnl_pos) / abs(sum(pnl_neg))
+    - 損失ゼロなら None を返す（np.inf ではなく）
     
     Args:
         monthly_returns: 月次リターンのリスト（小数）
+        equity_curve: エクイティカーブ（初期値1.0からの累積、Noneの場合は簡易版を使用）
     
     Returns:
         プロフィットファクタ（None if 計算不可）
@@ -178,16 +193,38 @@ def calculate_profit_factor_timeseries(monthly_returns: List[float]) -> Optional
     if not monthly_returns:
         return None
     
-    gains = [r for r in monthly_returns if r > 0]
-    losses = [abs(r) for r in monthly_returns if r < 0]
-    
-    total_gains = sum(gains) if gains else 0.0
-    total_losses = sum(losses) if losses else 0.0
-    
-    if total_losses == 0:
-        return None if total_gains == 0 else float('inf')
-    
-    return total_gains / total_losses
+    # エクイティカーブが提供されている場合は標準定義を使用
+    if equity_curve is not None and len(equity_curve) == len(monthly_returns) + 1:
+        # pnl_t = equity_{t-1} * r_t（通貨建て損益）
+        pnl_list = []
+        for i, r in enumerate(monthly_returns):
+            equity_prev = equity_curve[i]
+            pnl = equity_prev * r
+            pnl_list.append(pnl)
+        
+        pnl_array = np.array(pnl_list)
+        pnl_pos = pnl_array[pnl_array > 0]
+        pnl_neg = pnl_array[pnl_array < 0]
+        
+        total_pnl_pos = np.sum(pnl_pos) if len(pnl_pos) > 0 else 0.0
+        total_pnl_neg = np.sum(pnl_neg) if len(pnl_neg) > 0 else 0.0
+        
+        if total_pnl_neg == 0:
+            return None  # 損失ゼロなら None（np.inf ではなく）
+        
+        return float(total_pnl_pos / abs(total_pnl_neg))
+    else:
+        # 簡易版: 月次リターンの正負を単純合計（後方互換性のため）
+        gains = [r for r in monthly_returns if r > 0]
+        losses = [abs(r) for r in monthly_returns if r < 0]
+        
+        total_gains = sum(gains) if gains else 0.0
+        total_losses = sum(losses) if losses else 0.0
+        
+        if total_losses == 0:
+            return None  # 損失ゼロなら None（np.inf ではなく）
+        
+        return float(total_gains / total_losses)
 
 
 def calculate_win_rate_timeseries(

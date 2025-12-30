@@ -54,6 +54,13 @@ perf = calculate_portfolio_performance(
 ### 計算方法
 各リバランス日 `ti` から**次のリバランス日 `ti+1`**までの月次リターンを計算します。
 
+**売買タイミング（open-close方式）**:
+- 意思決定: リバランス日 `t` の引けでシグナル確定（`t`までの情報で計算）
+- 購入執行: リバランス日の翌営業日 `t+1` の寄り成（open）で購入
+- 売却執行: 次のリバランス日 `t_next` の引け成（close）で売却
+- 期間リターン: `open(t+1)` → `close(t_next)` の期間
+- TOPIXも同じタイミング（購入: open、売却: close）で統一
+
 ```
 リバランス日 t0 → リバランス日 t1
 リバランス日 t1 → リバランス日 t2
@@ -192,6 +199,29 @@ sharpe = calculate_sharpe_ratio(
 
 ---
 
-**最終更新日**: 2025-12-29  
-**バージョン**: 1.0
+**最終更新日**: 2025-12-30  
+**バージョン**: 1.1
+
+---
+
+## 7. OOS/WFA 評価（Phase 5）
+
+### ファイル
+- `src/omanta_3rd/jobs/walk_forward_timeseries.py`
+- `src/omanta_3rd/jobs/holdout_eval_timeseries.py`
+- `src/omanta_3rd/backtest/eval_common.py`
+
+### 目的
+過学習の有無を検証するため、OOS（Out-of-Sample）評価を自動化します。
+
+### Walk-Forward Analysis
+- foldごとにtrain期間で最適化→test期間で固定評価を繰り返します
+- test期間のSharpe_excessの平均・標準偏差を集計し、過学習サインを検出します
+
+### ホールドアウト評価
+- Train期間で最適化→Holdout期間で固定評価を行います
+- Train vs Holdout のギャップ（過学習サイン）を確認します
+
+### 使用方法
+詳細は `TIMESERIES_REFINEMENT_PLAN.md` の「6. Phase 5: OOS/WFA 自動化」を参照してください。
 

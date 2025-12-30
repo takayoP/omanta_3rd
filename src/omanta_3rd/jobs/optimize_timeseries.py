@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass, replace, fields
 from datetime import datetime
@@ -67,7 +68,8 @@ def run_backtest_for_optimization_timeseries(
     entry_params: EntryScoreParams,
     cost_bps: float = 0.0,
     n_jobs: int = -1,
-) -> Dict[str, float]:
+    enable_timing: bool = False,
+) -> Dict[str, Any]:
     """
     最適化用のバックテスト実行（時系列版、並列計算対応）
     
@@ -80,10 +82,14 @@ def run_backtest_for_optimization_timeseries(
         entry_params: EntryScoreParams
         cost_bps: 取引コスト（bps、デフォルト: 0.0）
         n_jobs: 並列実行数（-1でCPU数、1で逐次実行）
+        enable_timing: 時間計測を有効にするか
     
     Returns:
-        パフォーマンス指標の辞書（時系列指標）
+        パフォーマンス指標の辞書（時系列指標）とタイミング情報
     """
+    trial_start_time = time.time()
+    timing_info = {}
+    
     # dataclassを辞書に変換（pickle可能にするため）
     strategy_params_dict = {
         field.name: getattr(strategy_params, field.name)
@@ -101,6 +107,9 @@ def run_backtest_for_optimization_timeseries(
         n_jobs = 1
     
     portfolios = {}  # {rebalance_date: portfolio_df}
+    
+    # データ取得・ポートフォリオ選定（時間計測）
+    data_start_time = time.time()
     
     # 並列実行: ポートフォリオ選定のみ
     if n_jobs > 1 and len(rebalance_dates) > 1:
@@ -134,6 +143,9 @@ def run_backtest_for_optimization_timeseries(
             if portfolio is not None and not portfolio.empty:
                 portfolios[rebalance_date] = portfolio
     
+    data_end_time = time.time()
+    timing_info["data_fetch_time"] = data_end_time - data_start_time
+    
     # デバッグ: 結果が空なら例外を投げる
     if not portfolios:
         raise RuntimeError(
@@ -142,9 +154,14 @@ def run_backtest_for_optimization_timeseries(
         )
     
     # ポートフォリオを一括保存
+    # 並列実行時の競合を避けるため、各試行で独立したデータベース接続を使用
+    # SQLiteのWALモードにより、並列読み取りは可能だが、書き込みは順次実行される
+    save_start_time = time.time()
     with connect_db() as conn:
         for rebalance_date, portfolio_df in portfolios.items():
             save_portfolio(conn, portfolio_df)
+    save_end_time = time.time()
+    timing_info["save_time"] = save_end_time - save_start_time
     
     # 時系列P/Lを計算
     if not rebalance_dates:
@@ -153,12 +170,15 @@ def run_backtest_for_optimization_timeseries(
     start_date = rebalance_dates[0]
     end_date = rebalance_dates[-1]
     
+    timeseries_start_time = time.time()
     timeseries_data = calculate_timeseries_returns(
         start_date=start_date,
         end_date=end_date,
         rebalance_dates=rebalance_dates,
         cost_bps=cost_bps,
     )
+    timeseries_end_time = time.time()
+    timing_info["timeseries_calc_time"] = timeseries_end_time - timeseries_start_time
     
     monthly_returns = timeseries_data["monthly_returns"]
     monthly_excess_returns = timeseries_data["monthly_excess_returns"]
@@ -170,6 +190,7 @@ def run_backtest_for_optimization_timeseries(
         )
     
     # 時系列指標を計算
+    metrics_start_time = time.time()
     mean_excess_return = np.mean(monthly_excess_returns) * 100.0  # %換算
     mean_return = np.mean(monthly_returns) * 100.0  # %換算
     
@@ -191,8 +212,13 @@ def run_backtest_for_optimization_timeseries(
     )
     if sharpe_ratio is None:
         sharpe_ratio = 0.0
+    metrics_end_time = time.time()
+    timing_info["metrics_calc_time"] = metrics_end_time - metrics_start_time
     
-    return {
+    trial_end_time = time.time()
+    timing_info["total_time"] = trial_end_time - trial_start_time
+    
+    result = {
         "mean_excess_return": mean_excess_return,  # %
         "mean_return": mean_return,  # %
         "win_rate": win_rate,  # 0.0-1.0
@@ -200,6 +226,11 @@ def run_backtest_for_optimization_timeseries(
         "num_portfolios": len(portfolios),
         "num_monthly_returns": len(monthly_returns),
     }
+    
+    if enable_timing:
+        result["timing"] = timing_info
+    
+    return result
 
 
 def objective_timeseries(
@@ -207,6 +238,7 @@ def objective_timeseries(
     rebalance_dates: List[str],
     cost_bps: float = 0.0,
     n_jobs: int = -1,
+    enable_timing: bool = False,
 ) -> float:
     """
     Optunaの目的関数（時系列版）
@@ -216,6 +248,7 @@ def objective_timeseries(
         rebalance_dates: リバランス日のリスト
         cost_bps: 取引コスト（bps、デフォルト: 0.0）
         n_jobs: 並列実行数（-1でCPU数）
+        enable_timing: 時間計測を有効にするか
     
     Returns:
         最適化対象の値（時系列指標ベース）
@@ -277,21 +310,24 @@ def objective_timeseries(
     
     # バックテスト実行（時系列版）
     perf = run_backtest_for_optimization_timeseries(
-        rebalance_dates, strategy_params, entry_params, cost_bps=cost_bps, n_jobs=n_jobs
+        rebalance_dates, strategy_params, entry_params, cost_bps=cost_bps, n_jobs=n_jobs, enable_timing=enable_timing
     )
     
-    # 目的関数: 時系列指標ベース
-    # mean_excess_return: 月次超過リターン系列の平均（%）
-    # win_rate: 月次勝率（0.0-1.0）
-    # sharpe_ratio: 月次超過リターン系列のSharpe（年率化済み）
-    objective_value = (
-        perf["mean_excess_return"] * 0.7
-        + perf["win_rate"] * 10.0 * 0.2  # 勝率を10倍してスケール調整
-        + perf["sharpe_ratio"] * 0.1
-    )
+    # 目的関数: 超過リターン系列のIR（=Sharpe_excess）を主軸に
+    # sharpe_ratio: 月次超過リターン系列のSharpe（年率化済み）= IR
+    # 必要なら微調整: sharpe_excess + 0.1*mean_excess - 0.05*turnover_penalty - 0.1*missing_penalty
+    # 勝率項は入れる場合でも小さく（または撤去）
+    objective_value = perf["sharpe_ratio"]  # 主軸: Sharpe_excess（=IR）
+    
+    # 微調整（必要に応じて有効化）
+    # objective_value = (
+    #     perf["sharpe_ratio"] * 1.0  # 主軸
+    #     + perf["mean_excess_return"] * 0.1  # 平均超過リターン（小さく）
+    #     # 勝率は撤去（または非常に小さく）
+    # )
     
     # デバッグ用ログ出力
-    print(
+    log_msg = (
         f"[Trial {trial.number}] "
         f"objective={objective_value:.4f}, "
         f"excess_return={perf['mean_excess_return']:.4f}%, "
@@ -299,7 +335,27 @@ def objective_timeseries(
         f"sharpe={perf['sharpe_ratio']:.4f}"
     )
     
+    if enable_timing and "timing" in perf:
+        timing = perf["timing"]
+        log_msg += (
+            f" | time={timing['total_time']:.2f}s "
+            f"(data={timing['data_fetch_time']:.2f}s, "
+            f"save={timing['save_time']:.2f}s, "
+            f"timeseries={timing['timeseries_calc_time']:.2f}s, "
+            f"metrics={timing['metrics_calc_time']:.2f}s)"
+        )
+    
+    print(log_msg)
+    
     return objective_value
+
+
+def _setup_blas_threads():
+    """BLASスレッドを1に設定（プロセス並列時の過負荷を防ぐ）"""
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
 def main(
@@ -308,8 +364,11 @@ def main(
     n_trials: int = 50,
     study_name: Optional[str] = None,
     n_jobs: int = -1,
+    bt_workers: int = 1,
+    parallel_mode: str = "trial",
     cost_bps: float = 0.0,
     show_progress_window: bool = True,
+    storage: Optional[str] = None,
 ):
     """
     最適化を実行（時系列版）
@@ -319,20 +378,23 @@ def main(
         end_date: 終了日（YYYY-MM-DD）
         n_trials: 試行回数
         study_name: スタディ名（Noneの場合は自動生成）
-        n_jobs: 並列実行数（-1でCPU数）
+        n_jobs: trial並列数（-1でCPU数、parallel_mode='trial'の場合に使用）
+        bt_workers: trial内バックテストの並列数（デフォルト: 1）
+        parallel_mode: 並列化モード（'trial', 'backtest', 'hybrid'）
         cost_bps: 取引コスト（bps、デフォルト: 0.0）
         show_progress_window: 進捗ウィンドウを表示するか
+        storage: Optunaストレージ（Noneの場合はSQLite、例: 'postgresql://...'）
     """
+    # BLASスレッドを1に設定
+    _setup_blas_threads()
+    
     print("=" * 80)
     print("パラメータ最適化システム（並列計算対応、時系列版）")
     print("=" * 80)
     print(f"期間: {start_date} ～ {end_date}")
     print(f"試行回数: {n_trials}")
     print(f"取引コスト: {cost_bps} bps")
-    if n_jobs == -1:
-        print(f"並列実行数: {mp.cpu_count()} (CPU数、ポートフォリオ保存は一括化)")
-    else:
-        print(f"並列実行数: {n_jobs}")
+    print(f"並列化モード: {parallel_mode}")
     print("=" * 80)
     print()
     
@@ -351,10 +413,14 @@ def main(
     if study_name is None:
         study_name = f"optimization_timeseries_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
+    # ストレージの設定
+    if storage is None:
+        storage = f"sqlite:///optuna_{study_name}.db"
+    
     study = optuna.create_study(
         direction="maximize",
         study_name=study_name,
-        storage=f"sqlite:///optuna_{study_name}.db",
+        storage=storage,
         load_if_exists=True,
     )
     
@@ -393,15 +459,82 @@ def main(
             elif current_value is not None:
                 progress_window.update(trial.number + 1, current_value, params)
     
+    # 並列化設定
+    cpu_count = mp.cpu_count()
+    enable_timing = True  # 時間計測を有効化
+    
+    if parallel_mode == "trial":
+        # trial並列のみ（推奨）
+        if n_jobs == -1:
+            # SQLiteの場合は控えめに（2-4）
+            if storage.startswith("sqlite"):
+                optuna_n_jobs = min(4, max(2, cpu_count // 2))
+            else:
+                optuna_n_jobs = min(8, max(1, cpu_count // 2))
+        else:
+            optuna_n_jobs = n_jobs
+        backtest_n_jobs = bt_workers  # trial内は逐次または指定数
+        print("最適化を開始します...")
+        print(f"CPU数: {cpu_count}")
+        print(f"Optuna試行並列数: {optuna_n_jobs}")
+        print(f"各試行内のバックテスト並列数: {backtest_n_jobs}")
+        print()
+    elif parallel_mode == "backtest":
+        # trial逐次、trial内並列
+        optuna_n_jobs = 1
+        if bt_workers == -1:
+            backtest_n_jobs = min(len(rebalance_dates), cpu_count)
+        else:
+            backtest_n_jobs = bt_workers
+        print("最適化を開始します...")
+        print(f"CPU数: {cpu_count}")
+        print(f"Optuna試行並列数: {optuna_n_jobs} (逐次)")
+        print(f"各試行内のバックテスト並列数: {backtest_n_jobs}")
+        print()
+    elif parallel_mode == "hybrid":
+        # 二重並列（条件付き）
+        if n_jobs == -1:
+            optuna_n_jobs = min(4, max(2, cpu_count // 2))
+        else:
+            optuna_n_jobs = n_jobs
+        if bt_workers == -1:
+            backtest_n_jobs = max(1, cpu_count // optuna_n_jobs)
+        else:
+            backtest_n_jobs = bt_workers
+        # オーバーサブスクライブを防ぐ
+        if optuna_n_jobs * backtest_n_jobs > cpu_count:
+            print(f"警告: 並列度がCPU数を超えています。調整します。")
+            backtest_n_jobs = max(1, cpu_count // optuna_n_jobs)
+        print("最適化を開始します...")
+        print(f"CPU数: {cpu_count}")
+        print(f"Optuna試行並列数: {optuna_n_jobs}")
+        print(f"各試行内のバックテスト並列数: {backtest_n_jobs}")
+        print(f"理論上の最大並列度: {optuna_n_jobs * backtest_n_jobs}")
+        print()
+    else:
+        raise ValueError(f"不明な並列化モード: {parallel_mode}")
+    
+    # 時間計測用のリスト
+    trial_times = []
+    
     # 最適化実行
-    print("最適化を開始します...")
     study.optimize(
-        lambda trial: objective_timeseries(trial, rebalance_dates, cost_bps, n_jobs),
+        lambda trial: objective_timeseries(
+            trial, rebalance_dates, cost_bps, backtest_n_jobs, enable_timing=enable_timing
+        ),
         n_trials=n_trials,
         show_progress_bar=True,
-        n_jobs=1,  # Optunaの試行は逐次実行（各試行内でバックテストを並列化）
+        n_jobs=optuna_n_jobs,
         callbacks=[callback] if progress_window else None,
     )
+    
+    # 完了したtrialの時間を収集
+    for trial in study.trials:
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None:
+            # trialのシステム属性から時間を取得（可能な場合）
+            # 実際の時間はobjective_timeseries内で計測されるため、
+            # ここでは簡易的にtrial間の時間差を計算
+            pass
     
     # 進捗ウィンドウを閉じる
     if progress_window:
@@ -467,6 +600,52 @@ def main(
         )
     print(f"結果を {result_file} に保存しました")
     
+    # サマリーレポート
+    print()
+    print("=" * 80)
+    print("【最適化サマリー】")
+    print("=" * 80)
+    
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    if completed_trials:
+        # Sharpe_excessの分布を計算
+        sharpe_values = [t.value for t in completed_trials if t.value is not None]
+        if sharpe_values:
+            sharpe_values_sorted = sorted(sharpe_values, reverse=True)
+            best_sharpe = sharpe_values_sorted[0]
+            p95_idx = max(0, int(len(sharpe_values_sorted) * 0.05))
+            p95_sharpe = sharpe_values_sorted[p95_idx] if p95_idx < len(sharpe_values_sorted) else sharpe_values_sorted[-1]
+            median_idx = len(sharpe_values_sorted) // 2
+            median_sharpe = sharpe_values_sorted[median_idx]
+            
+            print(f"完了試行数: {len(completed_trials)}")
+            print(f"Sharpe_excess分布:")
+            print(f"  best: {best_sharpe:.4f}")
+            print(f"  p95: {p95_sharpe:.4f} ({p95_sharpe/best_sharpe*100:.1f}% of best)")
+            print(f"  median: {median_sharpe:.4f} ({median_sharpe/best_sharpe*100:.1f}% of best)")
+            print()
+            
+            # 上位5 trialのパラメータ分布（簡易版）
+            top5_trials = sorted(completed_trials, key=lambda t: t.value if t.value is not None else float('-inf'), reverse=True)[:5]
+            print("上位5 trialのパラメータ範囲:")
+            if top5_trials:
+                param_ranges = {}
+                for trial in top5_trials:
+                    for key, value in trial.params.items():
+                        if key not in param_ranges:
+                            param_ranges[key] = []
+                        param_ranges[key].append(value)
+                
+                for key in sorted(param_ranges.keys())[:10]:  # 最初の10パラメータのみ表示
+                    values = param_ranges[key]
+                    min_val = min(values)
+                    max_val = max(values)
+                    if max_val - min_val > 0.01:  # 差が大きい場合のみ表示
+                        print(f"  {key}: {min_val:.4f} ~ {max_val:.4f} (range: {max_val-min_val:.4f})")
+            print()
+    
+    print("=" * 80)
+    
     # 可視化（オプション）
     try:
         fig1 = plot_optimization_history(study)
@@ -486,8 +665,12 @@ if __name__ == "__main__":
     parser.add_argument("--end", type=str, required=True, help="終了日（YYYY-MM-DD）")
     parser.add_argument("--n-trials", type=int, default=50, help="試行回数")
     parser.add_argument("--study-name", type=str, help="スタディ名")
-    parser.add_argument("--n-jobs", type=int, default=-1, help="並列実行数（-1でCPU数）")
+    parser.add_argument("--n-jobs", type=int, default=-1, help="trial並列数（-1で自動、parallel-mode='trial'の場合に使用）")
+    parser.add_argument("--bt-workers", type=int, default=1, help="trial内バックテストの並列数（デフォルト: 1）")
+    parser.add_argument("--parallel-mode", type=str, default="trial", choices=["trial", "backtest", "hybrid"],
+                        help="並列化モード: trial（推奨）、backtest、hybrid")
     parser.add_argument("--cost", type=float, default=0.0, help="取引コスト（bps）")
+    parser.add_argument("--storage", type=str, help="Optunaストレージ（例: postgresql://user:pass@host/db、デフォルト: SQLite）")
     parser.add_argument("--no-progress-window", action="store_true", help="進捗ウィンドウを表示しない")
     
     args = parser.parse_args()
@@ -498,7 +681,10 @@ if __name__ == "__main__":
         n_trials=args.n_trials,
         study_name=args.study_name,
         n_jobs=args.n_jobs,
+        bt_workers=args.bt_workers,
+        parallel_mode=args.parallel_mode,
         cost_bps=args.cost,
+        storage=args.storage,
         show_progress_window=not args.no_progress_window,
     )
 
