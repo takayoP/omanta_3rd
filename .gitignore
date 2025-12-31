@@ -66,4 +66,22 @@ Thumbs.db
 # Cache files (large data files)
 cache/
 
+# Optimization results (large files)
+optuna_*.db
+optimization_history_*.png
+param_importances_*.png
+optimization_result_*.json
+top_10_trials_*.csv
+top_10_trials_*.json
+
+# Excel files (large files)
+*.xlsx
+~$*.xlsx
+
+# Performance metrics (generated files)
+performance_metrics.xlsx
+performance_metrics.csv
+performance_metrics.json
+performance_metrics_summary.csv
+
 
