@@ -45,19 +45,20 @@ from ..jobs.monthly_run import (
     save_features,
     save_portfolio,
 )
-from ..backtest.timeseries import calculate_timeseries_returns
+from ..backtest.timeseries import calculate_timeseries_returns, calculate_timeseries_returns_from_portfolios
 from ..backtest.metrics import (
     calculate_sharpe_ratio,
     calculate_win_rate_timeseries,
 )
 from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
+from ..backtest.feature_cache import FeatureCache
 
 # 既存のoptimize.pyから必要な関数をインポート
 from .optimize import (
     EntryScoreParams,
     _entry_score_with_params,
+    _calculate_entry_score_with_params,
     _select_portfolio_with_params,
-    _run_single_backtest_portfolio_only,
     ProgressWindow,
 )
 
@@ -69,9 +70,13 @@ def run_backtest_for_optimization_timeseries(
     cost_bps: float = 0.0,
     n_jobs: int = -1,
     enable_timing: bool = False,
+    trial: Optional[optuna.Trial] = None,
+    features_dict: Optional[Dict[str, pd.DataFrame]] = None,
+    prices_dict: Optional[Dict[str, Dict[str, List[float]]]] = None,
+    save_to_db: bool = True,
 ) -> Dict[str, Any]:
     """
-    最適化用のバックテスト実行（時系列版、並列計算対応）
+    最適化用のバックテスト実行（時系列版、並列計算対応、キャッシュ対応）
     
     設計: 並列ワーカーは「ポートフォリオ選定だけ」を返し、
           保存後に時系列P/Lを計算する
@@ -83,6 +88,10 @@ def run_backtest_for_optimization_timeseries(
         cost_bps: 取引コスト（bps、デフォルト: 0.0）
         n_jobs: 並列実行数（-1でCPU数、1で逐次実行）
         enable_timing: 時間計測を有効にするか
+        trial: OptunaのTrialオブジェクト
+        features_dict: 特徴量辞書（{rebalance_date: features_df}、Noneの場合はDBから取得）
+        prices_dict: 価格データ辞書（{rebalance_date: {code: [adj_close, ...]}}、Noneの場合はDBから取得）
+        save_to_db: ポートフォリオをDBに保存するか（デフォルト: True）
     
     Returns:
         パフォーマンス指標の辞書（時系列指標）とタイミング情報
@@ -120,6 +129,8 @@ def run_backtest_for_optimization_timeseries(
                     rebalance_date,
                     strategy_params_dict,
                     entry_params_dict,
+                    features_dict.get(rebalance_date) if features_dict else None,
+                    prices_dict.get(rebalance_date) if prices_dict else None,
                 ): rebalance_date
                 for rebalance_date in rebalance_dates
             }
@@ -139,6 +150,8 @@ def run_backtest_for_optimization_timeseries(
                 rebalance_date,
                 strategy_params_dict,
                 entry_params_dict,
+                features_dict.get(rebalance_date) if features_dict else None,
+                prices_dict.get(rebalance_date) if prices_dict else None,
             )
             if portfolio is not None and not portfolio.empty:
                 portfolios[rebalance_date] = portfolio
@@ -153,17 +166,16 @@ def run_backtest_for_optimization_timeseries(
             f"Check worker errors, feature building, or portfolio selection logic."
         )
     
-    # ポートフォリオを一括保存
-    # 並列実行時の競合を避けるため、各試行で独立したデータベース接続を使用
-    # SQLiteのWALモードにより、並列読み取りは可能だが、書き込みは順次実行される
+    # ポートフォリオをDBに保存（オプション）
     save_start_time = time.time()
-    with connect_db() as conn:
-        for rebalance_date, portfolio_df in portfolios.items():
-            save_portfolio(conn, portfolio_df)
+    if save_to_db:
+        with connect_db() as conn:
+            for rebalance_date, portfolio_df in portfolios.items():
+                save_portfolio(conn, portfolio_df)
     save_end_time = time.time()
-    timing_info["save_time"] = save_end_time - save_start_time
+    timing_info["save_time"] = save_end_time - save_start_time if save_to_db else 0.0
     
-    # 時系列P/Lを計算
+    # 時系列P/Lを計算（portfoliosを直接渡す）
     if not rebalance_dates:
         raise RuntimeError("No rebalance dates provided")
     
@@ -171,7 +183,9 @@ def run_backtest_for_optimization_timeseries(
     end_date = rebalance_dates[-1]
     
     timeseries_start_time = time.time()
-    timeseries_data = calculate_timeseries_returns(
+    # portfoliosを直接渡すことで、DBへの保存を回避（SQLiteロック待ちを削減）
+    timeseries_data = calculate_timeseries_returns_from_portfolios(
+        portfolios=portfolios,
         start_date=start_date,
         end_date=end_date,
         rebalance_dates=rebalance_dates,
@@ -229,8 +243,96 @@ def run_backtest_for_optimization_timeseries(
     
     if enable_timing:
         result["timing"] = timing_info
+        # trialのuser_attrsにtiming情報を保存（後で集計用）
+        if trial is not None:
+            trial.set_user_attr("timing", timing_info)
     
     return result
+
+
+def _run_single_backtest_portfolio_only(
+    rebalance_date: str,
+    strategy_params_dict: dict,
+    entry_params_dict: dict,
+    feat: Optional[pd.DataFrame] = None,
+    prices_data: Optional[Dict[str, List[float]]] = None,
+) -> Optional[pd.DataFrame]:
+    """
+    単一のリバランス日に対するポートフォリオ選定のみ（並列化用、キャッシュ対応）
+    
+    Args:
+        rebalance_date: リバランス日
+        strategy_params_dict: StrategyParamsを辞書化したもの
+        entry_params_dict: EntryScoreParamsを辞書化したもの
+        feat: 特徴量DataFrame（Noneの場合はDBから取得）
+        prices_data: 価格データ（{code: [adj_close, ...]}、Noneの場合はDBから取得）
+    
+    Returns:
+        ポートフォリオDataFrame（エラー時はNone）
+    """
+    try:
+        # 辞書からdataclassに復元
+        strategy_params = StrategyParams(**strategy_params_dict)
+        entry_params = EntryScoreParams(**entry_params_dict)
+        
+        # 特徴量を取得（キャッシュ優先）
+        if feat is None:
+            # DBから取得
+            try:
+                with connect_db(read_only=True) as conn:
+                    feat = build_features(conn, rebalance_date)
+            except sqlite3.OperationalError as e:
+                if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                    with connect_db(read_only=False) as conn:
+                        feat = build_features(conn, rebalance_date)
+                else:
+                    raise
+        
+        if feat is None or feat.empty:
+            return None
+        
+        # entry_scoreを計算（パラメータ化版、価格データはキャッシュから取得）
+        if prices_data is not None:
+            # キャッシュから価格データを取得
+            close_map = {
+                code: pd.Series(prices)
+                for code, prices in prices_data.items()
+            }
+            feat["entry_score"] = feat["code"].apply(
+                lambda c: _entry_score_with_params(close_map.get(c), entry_params)
+                if c in close_map
+                else np.nan
+            )
+        else:
+            # DBから価格データを取得
+            price_date = feat["as_of_date"].iloc[0]
+            with connect_db(read_only=True) as conn:
+                prices_win = pd.read_sql_query(
+                    """
+                    SELECT code, date, adj_close
+                    FROM prices_daily
+                    WHERE date <= ?
+                    ORDER BY code, date
+                    """,
+                    conn,
+                    params=(price_date,),
+                )
+            feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
+        
+        # ポートフォリオを選択（パラメータ化版）
+        portfolio = _select_portfolio_with_params(
+            feat, strategy_params, entry_params
+        )
+        
+        if portfolio is None or portfolio.empty:
+            return None
+        
+        return portfolio
+    except Exception as e:
+        print(f"エラー ({rebalance_date}): {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def objective_timeseries(
@@ -239,7 +341,23 @@ def objective_timeseries(
     cost_bps: float = 0.0,
     n_jobs: int = -1,
     enable_timing: bool = False,
+    features_dict: Optional[Dict[str, pd.DataFrame]] = None,
+    prices_dict: Optional[Dict[str, Dict[str, List[float]]]] = None,
+    save_to_db: bool = True,
 ) -> float:
+    """
+    Optunaの目的関数（時系列版）
+    
+    Args:
+        trial: OptunaのTrialオブジェクト
+        rebalance_dates: リバランス日のリスト
+        cost_bps: 取引コスト（bps、デフォルト: 0.0）
+        n_jobs: 並列実行数（-1でCPU数）
+        enable_timing: 時間計測を有効にするか
+    
+    Returns:
+        最適化対象の値（時系列指標ベース）
+    """
     """
     Optunaの目的関数（時系列版）
     
@@ -310,7 +428,16 @@ def objective_timeseries(
     
     # バックテスト実行（時系列版）
     perf = run_backtest_for_optimization_timeseries(
-        rebalance_dates, strategy_params, entry_params, cost_bps=cost_bps, n_jobs=n_jobs, enable_timing=enable_timing
+        rebalance_dates,
+        strategy_params,
+        entry_params,
+        cost_bps=cost_bps,
+        n_jobs=n_jobs,
+        enable_timing=enable_timing,
+        trial=trial,
+        features_dict=features_dict,
+        prices_dict=prices_dict,
+        save_to_db=save_to_db,
     )
     
     # 目的関数: 超過リターン系列のIR（=Sharpe_excess）を主軸に
@@ -364,14 +491,16 @@ def main(
     n_trials: int = 50,
     study_name: Optional[str] = None,
     n_jobs: int = -1,
-    bt_workers: int = 1,
+    bt_workers: int = -1,  # デフォルトで自動設定（-1）
     parallel_mode: str = "trial",
     cost_bps: float = 0.0,
     show_progress_window: bool = True,
     storage: Optional[str] = None,
+    no_db_write: bool = False,
+    cache_dir: str = "cache/features",
 ):
     """
-    最適化を実行（時系列版）
+    最適化を実行（時系列版、特徴量キャッシュ対応）
     
     Args:
         start_date: 開始日（YYYY-MM-DD）
@@ -384,6 +513,8 @@ def main(
         cost_bps: 取引コスト（bps、デフォルト: 0.0）
         show_progress_window: 進捗ウィンドウを表示するか
         storage: Optunaストレージ（Noneの場合はSQLite、例: 'postgresql://...'）
+        no_db_write: 最適化中にDBに書き込まない（デフォルト: False）
+        cache_dir: キャッシュディレクトリ（デフォルト: "cache/features"）
     """
     # BLASスレッドを1に設定
     _setup_blas_threads()
@@ -409,6 +540,15 @@ def main(
         print("❌ リバランス日が見つかりませんでした")
         return
     
+    # 特徴量キャッシュを構築
+    print("=" * 80)
+    print("特徴量キャッシュを構築します...")
+    print("=" * 80)
+    feature_cache = FeatureCache(cache_dir=cache_dir)
+    features_dict, prices_dict = feature_cache.warm(rebalance_dates, n_jobs=bt_workers if bt_workers > 0 else -1)
+    print(f"[FeatureCache] 特徴量: {len(features_dict)}日分、価格データ: {len(prices_dict)}日分")
+    print()
+    
     # Optunaスタディを作成
     if study_name is None:
         study_name = f"optimization_timeseries_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -424,56 +564,102 @@ def main(
         load_if_exists=True,
     )
     
-    # 進捗ウィンドウを作成
+    # 並列化設定を先に計算（進捗ウィンドウの表示判定に使用）
+    cpu_count = mp.cpu_count()
+    
+    # 並列数の事前計算（進捗ウィンドウの表示判定用）
+    if parallel_mode == "trial":
+        if n_jobs == -1:
+            if storage.startswith("sqlite"):
+                optuna_n_jobs_preview = min(4, max(2, min(4, cpu_count // 8)))
+            else:
+                optuna_n_jobs_preview = min(8, max(1, cpu_count // 2))
+        else:
+            optuna_n_jobs_preview = n_jobs
+    elif parallel_mode == "backtest":
+        optuna_n_jobs_preview = 1
+    elif parallel_mode == "hybrid":
+        if n_jobs == -1:
+            if storage.startswith("sqlite"):
+                optuna_n_jobs_preview = max(2, min(cpu_count - 1, int(cpu_count * 0.6)))
+            else:
+                optuna_n_jobs_preview = min(4, max(2, cpu_count // 2))
+        else:
+            optuna_n_jobs_preview = n_jobs
+    else:
+        optuna_n_jobs_preview = 1
+    
+    # 進捗ウィンドウを作成（並列実行時は無効化）
     progress_window = None
-    if show_progress_window and TKINTER_AVAILABLE:
+    # 並列実行時（n_jobs > 1）は進捗ウィンドウを表示しない（tkinterのスレッドセーフ問題を回避）
+    if show_progress_window and TKINTER_AVAILABLE and optuna_n_jobs_preview == 1:
         progress_window = ProgressWindow(n_trials)
         progress_window.run()
         print("進捗ウィンドウを表示しました")
+    elif show_progress_window and optuna_n_jobs_preview > 1:
+        print("並列実行のため、進捗ウィンドウは表示しません（tkinterのスレッドセーフ問題を回避）")
     
-    # コールバック関数（既存版と同じ）
+    # コールバック関数（並列実行時は進捗ウィンドウを更新しない）
     def callback(study: optuna.Study, trial: optuna.Trial):
         """最適化の進捗を更新"""
-        if progress_window:
-            current_value = trial.value if trial.value is not None else None
-            best_value = None
+        # 並列実行時（n_jobs > 1）はtkinterの更新がスレッドセーフでないため無効化
+        if progress_window and optuna_n_jobs_preview == 1:
             try:
-                best_value = study.best_value
-            except ValueError:
-                if len(study.trials) > 0:
-                    completed_trials = [
-                        t for t in study.trials 
-                        if t.state == optuna.trial.TrialState.COMPLETE
-                    ]
-                    if completed_trials:
-                        best_trial = max(
-                            completed_trials,
-                            key=lambda t: t.value if t.value is not None else float('-inf')
-                        )
-                        best_value = best_trial.value if best_trial.value is not None else None
-            
-            params = trial.params if hasattr(trial, 'params') else None
-            
-            if best_value is not None:
-                progress_window.update(trial.number + 1, best_value, params)
-            elif current_value is not None:
-                progress_window.update(trial.number + 1, current_value, params)
+                current_value = trial.value if trial.value is not None else None
+                best_value = None
+                try:
+                    best_value = study.best_value
+                except ValueError:
+                    if len(study.trials) > 0:
+                        completed_trials = [
+                            t for t in study.trials 
+                            if t.state == optuna.trial.TrialState.COMPLETE
+                        ]
+                        if completed_trials:
+                            best_trial = max(
+                                completed_trials,
+                                key=lambda t: t.value if t.value is not None else float('-inf')
+                            )
+                            best_value = best_trial.value if best_trial.value is not None else None
+                
+                params = trial.params if hasattr(trial, 'params') else None
+                
+                if best_value is not None:
+                    progress_window.update(trial.number + 1, best_value, params)
+                elif current_value is not None:
+                    progress_window.update(trial.number + 1, current_value, params)
+            except RuntimeError:
+                # tkinterのエラー（メインスレッド以外からの更新）は無視
+                pass
     
     # 並列化設定
-    cpu_count = mp.cpu_count()
     enable_timing = True  # 時間計測を有効化
     
     if parallel_mode == "trial":
         # trial並列のみ（推奨）
         if n_jobs == -1:
-            # SQLiteの場合は控えめに（2-4）
+            # SQLiteの場合は控えめに（2-4程度）競合を避ける
+            # SQLiteのWALモードでも、Optunaのtrial並列が多すぎるとロック待ちが発生
             if storage.startswith("sqlite"):
-                optuna_n_jobs = min(4, max(2, cpu_count // 2))
+                # 2-4に制限（競合を最小化）
+                optuna_n_jobs = min(4, max(2, min(4, cpu_count // 8)))
             else:
                 optuna_n_jobs = min(8, max(1, cpu_count // 2))
         else:
             optuna_n_jobs = n_jobs
-        backtest_n_jobs = bt_workers  # trial内は逐次または指定数
+        # バックテスト内の並列化も有効化（リバランス日ごとに並列処理）
+        if bt_workers == -1:
+            # リバランス日数とCPU数を考慮して適切な並列数を決定
+            # 各trial内でリバランス日ごとに並列処理するため、残りのCPUリソースを活用
+            # trial並列数がCPU数の70%程度なので、残り30%をバックテスト並列に割り当て
+            # ただし、リバランス日数が少ない場合はそれに合わせる
+            available_cpus = max(1, cpu_count - optuna_n_jobs)
+            backtest_n_jobs = max(1, min(len(rebalance_dates), available_cpus))
+            # 最低でも2-4並列は確保（リバランス日数が十分にある場合）
+            if len(rebalance_dates) >= 4 and available_cpus >= 2:
+                backtest_n_jobs = max(2, min(len(rebalance_dates), min(4, available_cpus)))
+        else:
+            backtest_n_jobs = bt_workers
         print("最適化を開始します...")
         print(f"CPU数: {cpu_count}")
         print(f"Optuna試行並列数: {optuna_n_jobs}")
@@ -494,7 +680,11 @@ def main(
     elif parallel_mode == "hybrid":
         # 二重並列（条件付き）
         if n_jobs == -1:
-            optuna_n_jobs = min(4, max(2, cpu_count // 2))
+            # SQLiteでも積極的に並列化
+            if storage.startswith("sqlite"):
+                optuna_n_jobs = max(2, min(cpu_count - 1, int(cpu_count * 0.6)))
+            else:
+                optuna_n_jobs = min(4, max(2, cpu_count // 2))
         else:
             optuna_n_jobs = n_jobs
         if bt_workers == -1:
@@ -520,7 +710,14 @@ def main(
     # 最適化実行
     study.optimize(
         lambda trial: objective_timeseries(
-            trial, rebalance_dates, cost_bps, backtest_n_jobs, enable_timing=enable_timing
+            trial,
+            rebalance_dates,
+            cost_bps,
+            backtest_n_jobs,
+            enable_timing=enable_timing,
+            features_dict=features_dict,
+            prices_dict=prices_dict,
+            save_to_db=not no_db_write,
         ),
         n_trials=n_trials,
         show_progress_bar=True,
@@ -528,13 +725,26 @@ def main(
         callbacks=[callback] if progress_window else None,
     )
     
-    # 完了したtrialの時間を収集
+    # 完了したtrialのtiming情報を収集・集計
+    timing_summary = {
+        "data_fetch_times": [],
+        "save_times": [],
+        "timeseries_calc_times": [],
+        "metrics_calc_times": [],
+        "total_times": [],
+    }
+    
     for trial in study.trials:
         if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None:
-            # trialのシステム属性から時間を取得（可能な場合）
-            # 実際の時間はobjective_timeseries内で計測されるため、
-            # ここでは簡易的にtrial間の時間差を計算
-            pass
+            # trialのuser_attrsからtiming情報を取得
+            if hasattr(trial, 'user_attrs') and 'timing' in trial.user_attrs:
+                timing = trial.user_attrs['timing']
+                if isinstance(timing, dict):
+                    timing_summary["data_fetch_times"].append(timing.get("data_fetch_time", 0.0))
+                    timing_summary["save_times"].append(timing.get("save_time", 0.0))
+                    timing_summary["timeseries_calc_times"].append(timing.get("timeseries_calc_time", 0.0))
+                    timing_summary["metrics_calc_times"].append(timing.get("metrics_calc_time", 0.0))
+                    timing_summary["total_times"].append(timing.get("total_time", 0.0))
     
     # 進捗ウィンドウを閉じる
     if progress_window:
@@ -646,6 +856,54 @@ def main(
     
     print("=" * 80)
     
+    # Timingサマリーを表示
+    if any(timing_summary["total_times"]):
+        print()
+        print("=" * 80)
+        print("【Timingサマリー】")
+        print("=" * 80)
+        
+        def _print_timing_stats(name: str, times: List[float]):
+            if not times:
+                return
+            times_arr = np.array(times)
+            print(f"{name}:")
+            print(f"  平均: {np.mean(times_arr):.2f}s")
+            print(f"  中央値: {np.median(times_arr):.2f}s")
+            print(f"  最小: {np.min(times_arr):.2f}s")
+            print(f"  最大: {np.max(times_arr):.2f}s")
+            print(f"  合計: {np.sum(times_arr):.2f}s")
+            print()
+        
+        _print_timing_stats("data_fetch_time", timing_summary["data_fetch_times"])
+        _print_timing_stats("save_time", timing_summary["save_times"])
+        _print_timing_stats("timeseries_calc_time", timing_summary["timeseries_calc_times"])
+        _print_timing_stats("metrics_calc_time", timing_summary["metrics_calc_times"])
+        _print_timing_stats("total_time", timing_summary["total_times"])
+        
+        # ボトルネック分析
+        if timing_summary["total_times"]:
+            total_times_arr = np.array(timing_summary["total_times"])
+            avg_total = np.mean(total_times_arr)
+            
+            if avg_total > 0:
+                print("ボトルネック分析（平均時間の割合）:")
+                if timing_summary["data_fetch_times"]:
+                    avg_data = np.mean(timing_summary["data_fetch_times"])
+                    print(f"  data_fetch: {avg_data/avg_total*100:.1f}%")
+                if timing_summary["save_times"]:
+                    avg_save = np.mean(timing_summary["save_times"])
+                    print(f"  save: {avg_save/avg_total*100:.1f}%")
+                if timing_summary["timeseries_calc_times"]:
+                    avg_ts = np.mean(timing_summary["timeseries_calc_times"])
+                    print(f"  timeseries_calc: {avg_ts/avg_total*100:.1f}%")
+                if timing_summary["metrics_calc_times"]:
+                    avg_metrics = np.mean(timing_summary["metrics_calc_times"])
+                    print(f"  metrics_calc: {avg_metrics/avg_total*100:.1f}%")
+                print()
+        
+        print("=" * 80)
+    
     # 可視化（オプション）
     try:
         fig1 = plot_optimization_history(study)
@@ -666,12 +924,14 @@ if __name__ == "__main__":
     parser.add_argument("--n-trials", type=int, default=50, help="試行回数")
     parser.add_argument("--study-name", type=str, help="スタディ名")
     parser.add_argument("--n-jobs", type=int, default=-1, help="trial並列数（-1で自動、parallel-mode='trial'の場合に使用）")
-    parser.add_argument("--bt-workers", type=int, default=1, help="trial内バックテストの並列数（デフォルト: 1）")
+    parser.add_argument("--bt-workers", type=int, default=-1, help="trial内バックテストの並列数（-1で自動、デフォルト: -1）")
     parser.add_argument("--parallel-mode", type=str, default="trial", choices=["trial", "backtest", "hybrid"],
                         help="並列化モード: trial（推奨）、backtest、hybrid")
     parser.add_argument("--cost", type=float, default=0.0, help="取引コスト（bps）")
     parser.add_argument("--storage", type=str, help="Optunaストレージ（例: postgresql://user:pass@host/db、デフォルト: SQLite）")
     parser.add_argument("--no-progress-window", action="store_true", help="進捗ウィンドウを表示しない")
+    parser.add_argument("--no-db-write", action="store_true", help="最適化中にDBに書き込まない")
+    parser.add_argument("--cache-dir", type=str, default="cache/features", help="キャッシュディレクトリ（デフォルト: cache/features）")
     
     args = parser.parse_args()
     
@@ -686,5 +946,7 @@ if __name__ == "__main__":
         cost_bps=args.cost,
         storage=args.storage,
         show_progress_window=not args.no_progress_window,
+        no_db_write=args.no_db_write,
+        cache_dir=args.cache_dir,
     )
 

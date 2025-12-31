@@ -104,6 +104,76 @@ def _get_price(conn, code: str, date: str, use_open: bool = False) -> Optional[f
     return float(price_df[price_column].iloc[0])
 
 
+def _get_prices_bulk(
+    conn, codes: List[str], dates: List[str], use_open: bool = False
+) -> pd.DataFrame:
+    """
+    複数銘柄×複数日付の価格を一括取得（バルクSQL）
+    
+    Args:
+        conn: データベース接続
+        codes: 銘柄コードのリスト
+        dates: 日付のリスト（YYYY-MM-DD）
+        use_open: Trueの場合は始値、Falseの場合は終値を取得
+    
+    Returns:
+        DataFrame (code, date, price列)
+    """
+    if not codes or not dates:
+        return pd.DataFrame(columns=["code", "date", "price"])
+    
+    price_column = "open" if use_open else "close"
+    
+    # IN句で一括取得
+    codes_str = ",".join("?" * len(codes))
+    dates_str = ",".join("?" * len(dates))
+    
+    price_df = pd.read_sql_query(
+        f"""
+        SELECT code, date, {price_column} AS price
+        FROM prices_daily
+        WHERE code IN ({codes_str}) AND date IN ({dates_str})
+        """,
+        conn,
+        params=(*codes, *dates),
+    )
+    
+    return price_df
+
+
+def _get_topix_prices_bulk(
+    conn, dates: List[str], use_open: bool = False
+) -> pd.DataFrame:
+    """
+    複数日付のTOPIX価格を一括取得（バルクSQL）
+    
+    Args:
+        conn: データベース接続
+        dates: 日付のリスト（YYYY-MM-DD）
+        use_open: Trueの場合は始値、Falseの場合は終値を取得
+    
+    Returns:
+        DataFrame (date, price列)
+    """
+    if not dates:
+        return pd.DataFrame(columns=["date", "price"])
+    
+    price_column = "open" if use_open else "close"
+    dates_str = ",".join("?" * len(dates))
+    
+    price_df = pd.read_sql_query(
+        f"""
+        SELECT date, {price_column} AS price
+        FROM index_daily
+        WHERE index_code = ? AND date IN ({dates_str})
+        """,
+        conn,
+        params=(TOPIX_CODE, *dates),
+    )
+    
+    return price_df
+
+
 def _get_rebalance_dates(conn, start_date: str, end_date: str) -> List[str]:
     """
     リバランス日のリストを取得
@@ -203,6 +273,241 @@ def _calculate_turnover(
         "executed_buy_notional": executed_buy_notional,
         "executed_turnover": executed_turnover,
         "paper_turnover": paper_turnover,
+    }
+
+
+def calculate_timeseries_returns_from_portfolios(
+    portfolios: Dict[str, pd.DataFrame],
+    start_date: str,
+    end_date: str,
+    rebalance_dates: Optional[List[str]] = None,
+    cost_bps: float = 0.0,
+    buy_cost_bps: Optional[float] = None,
+    sell_cost_bps: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    時系列P/Lを計算（ポートフォリオを直接受け取る版）
+    
+    DBから読み込まず、メモリ上のportfolios辞書を使用します。
+    これにより、save_portfolio()の呼び出しを回避し、SQLiteロック待ちを削減できます。
+    
+    Args:
+        portfolios: {rebalance_date: portfolio_df} の辞書
+                    portfolio_dfは code, weight 列を含む必要がある
+        start_date: 開始日（YYYY-MM-DD）
+        end_date: 終了日（YYYY-MM-DD）
+        rebalance_dates: リバランス日のリスト（Noneの場合はportfoliosのキーから取得）
+        cost_bps: 取引コスト（bps、デフォルト: 0.0）
+        buy_cost_bps: 購入コスト（bps、Noneの場合はcost_bpsを使用）
+        sell_cost_bps: 売却コスト（bps、Noneの場合はcost_bpsを使用）
+    
+    Returns:
+        時系列P/L情報の辞書（calculate_timeseries_returnsと同じ形式）
+    """
+    # リバランス日のリストを取得
+    if rebalance_dates is None:
+        rebalance_dates = sorted([d for d in portfolios.keys() if start_date <= d <= end_date])
+    
+    if not rebalance_dates:
+        return {
+            "monthly_returns": [],
+            "monthly_excess_returns": [],
+            "equity_curve": [1.0],
+            "dates": [],
+            "portfolio_details": [],
+        }
+    
+    # 以降は calculate_timeseries_returns と同じロジックだが、
+    # _get_portfolio() の代わりに portfolios[rebalance_date] を使用
+    monthly_returns = []
+    monthly_excess_returns = []
+    equity_curve = [1.0]
+    portfolio_details = []
+    
+    # コストパラメータの設定
+    if buy_cost_bps is None:
+        buy_cost_bps = cost_bps
+    if sell_cost_bps is None:
+        sell_cost_bps = cost_bps
+    
+    previous_portfolio = None
+    
+    with connect_db() as conn:
+        for i, rebalance_date in enumerate(rebalance_dates):
+            # 次のリバランス日を取得
+            if i + 1 < len(rebalance_dates):
+                next_rebalance_date = rebalance_dates[i + 1]
+            else:
+                next_rebalance_date = end_date
+            
+            # ポートフォリオを取得（メモリから）
+            if rebalance_date not in portfolios:
+                monthly_returns.append(0.0)
+                monthly_excess_returns.append(0.0)
+                equity_curve.append(equity_curve[-1])
+                continue
+            
+            portfolio = portfolios[rebalance_date].copy()
+            if portfolio.empty:
+                monthly_returns.append(0.0)
+                monthly_excess_returns.append(0.0)
+                equity_curve.append(equity_curve[-1])
+                continue
+            
+            # リバランス日の翌営業日を取得（購入日）
+            purchase_date = _get_next_trading_day(conn, rebalance_date)
+            if purchase_date is None:
+                monthly_returns.append(0.0)
+                monthly_excess_returns.append(0.0)
+                equity_curve.append(equity_curve[-1])
+                continue
+            
+            # 売却日は次のリバランス日（終値で売却）
+            sell_date = next_rebalance_date
+            
+            # 各銘柄のリターンを計算（バルク取得+ベクトル計算）
+            # 必要な価格を一括取得
+            codes = portfolio["code"].tolist()
+            purchase_prices_df = _get_prices_bulk(conn, codes, [purchase_date], use_open=True)
+            sell_prices_df = _get_prices_bulk(conn, codes, [sell_date], use_open=False)
+            
+            # DataFrameにマージ
+            portfolio_with_prices = portfolio.copy()
+            purchase_prices_df = purchase_prices_df.rename(columns={"price": "purchase_price"})
+            sell_prices_df = sell_prices_df.rename(columns={"price": "sell_price"})
+            
+            portfolio_with_prices = portfolio_with_prices.merge(
+                purchase_prices_df[["code", "purchase_price"]], on="code", how="left"
+            )
+            portfolio_with_prices = portfolio_with_prices.merge(
+                sell_prices_df[["code", "sell_price"]], on="code", how="left"
+            )
+            
+            # 欠損銘柄を除外
+            missing_mask = (
+                portfolio_with_prices["purchase_price"].isna() |
+                portfolio_with_prices["sell_price"].isna()
+            )
+            missing_codes = portfolio_with_prices[missing_mask]["code"].tolist()
+            portfolio_valid = portfolio_with_prices[~missing_mask].copy()
+            
+            if portfolio_valid.empty:
+                stock_returns = []
+            else:
+                # 株式分割を考慮（ベクトル計算）
+                # 注意: _split_multiplier_betweenは個別呼び出しが必要だが、
+                # 将来的にはバルク化できる可能性がある
+                split_mults = []
+                for code in portfolio_valid["code"]:
+                    split_mult = _split_multiplier_between(conn, code, purchase_date, sell_date)
+                    split_mults.append(split_mult)
+                portfolio_valid["split_mult"] = split_mults
+                
+                # リターン計算（ベクトル化）
+                portfolio_valid["adjusted_purchase_price"] = (
+                    portfolio_valid["purchase_price"] / portfolio_valid["split_mult"]
+                )
+                portfolio_valid["return_decimal"] = (
+                    portfolio_valid["sell_price"] / portfolio_valid["adjusted_purchase_price"] - 1.0
+                )
+                
+                # stock_returns形式に変換
+                stock_returns = [
+                    {
+                        "code": row["code"],
+                        "weight": row["weight"],
+                        "return_decimal": row["return_decimal"],
+                    }
+                    for _, row in portfolio_valid.iterrows()
+                ]
+            
+            # ポートフォリオ全体のグロスリターン（重み付き平均）
+            if stock_returns:
+                total_weight = sum(r["weight"] for r in stock_returns)
+                if total_weight > 0:
+                    for r in stock_returns:
+                        r["weight"] = r["weight"] / total_weight
+                    
+                    portfolio_return_gross = sum(
+                        r["weight"] * r["return_decimal"] 
+                        for r in stock_returns
+                    )
+                else:
+                    portfolio_return_gross = 0.0
+                
+                # ターンオーバーを計算
+                turnover_info = _calculate_turnover(portfolio, previous_portfolio)
+                executed_sell_notional = turnover_info["executed_sell_notional"]
+                executed_buy_notional = turnover_info["executed_buy_notional"]
+                executed_turnover = turnover_info["executed_turnover"]
+                paper_turnover = turnover_info["paper_turnover"]
+                
+                # 取引コストを控除
+                cost_frac = (
+                    executed_buy_notional * buy_cost_bps / 1e4
+                    + executed_sell_notional * sell_cost_bps / 1e4
+                )
+                portfolio_return_net = portfolio_return_gross - cost_frac
+                
+                # TOPIXリターンを計算（バルク取得を使用）
+                topix_prices_df = _get_topix_prices_bulk(conn, [purchase_date, sell_date], use_open=False)
+                topix_purchase_df = _get_topix_prices_bulk(conn, [purchase_date], use_open=True)
+                
+                topix_purchase = None
+                topix_sell = None
+                if not topix_purchase_df.empty and purchase_date in topix_purchase_df["date"].values:
+                    topix_purchase = float(topix_purchase_df[topix_purchase_df["date"] == purchase_date]["price"].iloc[0])
+                if not topix_prices_df.empty and sell_date in topix_prices_df["date"].values:
+                    topix_sell = float(topix_prices_df[topix_prices_df["date"] == sell_date]["price"].iloc[0])
+                
+                if topix_purchase is not None and topix_sell is not None and topix_purchase > 0:
+                    topix_return = (topix_sell / topix_purchase - 1.0)
+                    excess_return = portfolio_return_net - topix_return
+                else:
+                    topix_return = 0.0
+                    excess_return = portfolio_return_net
+                
+                monthly_returns.append(portfolio_return_net)
+                monthly_excess_returns.append(excess_return)
+                equity_curve.append(equity_curve[-1] * (1.0 + portfolio_return_net))
+                
+                portfolio_details.append({
+                    "rebalance_date": rebalance_date,
+                    "purchase_date": purchase_date,
+                    "sell_date": sell_date,
+                    "next_rebalance_date": next_rebalance_date,
+                    "num_stocks": len(stock_returns),
+                    "num_missing_stocks": len(missing_codes),
+                    "missing_codes": missing_codes[:10],
+                    "portfolio_return_gross": portfolio_return_gross,
+                    "portfolio_return_net": portfolio_return_net,
+                    "topix_return": topix_return,
+                    "excess_return": excess_return,
+                    "executed_sell_notional": executed_sell_notional,
+                    "executed_buy_notional": executed_buy_notional,
+                    "executed_turnover": executed_turnover,
+                    "paper_turnover": paper_turnover,
+                    "cost_frac": cost_frac,
+                })
+                
+                previous_portfolio = portfolio.copy()
+                
+                if missing_codes:
+                    print(
+                        f"警告: {rebalance_date} で {len(missing_codes)}銘柄の価格データが欠損しています。"
+                        f"（銘柄コード: {missing_codes[:5]}{'...' if len(missing_codes) > 5 else ''}）"
+                    )
+            else:
+                monthly_returns.append(0.0)
+                monthly_excess_returns.append(0.0)
+                equity_curve.append(equity_curve[-1])
+    
+    return {
+        "monthly_returns": monthly_returns,
+        "monthly_excess_returns": monthly_excess_returns,
+        "equity_curve": equity_curve,
+        "dates": rebalance_dates,
+        "portfolio_details": portfolio_details,
     }
 
 
@@ -316,41 +621,58 @@ def calculate_timeseries_returns(
             # 売却日は次のリバランス日（終値で売却）
             sell_date = next_rebalance_date
             
-            # 各銘柄のリターンを計算
-            stock_returns = []
-            missing_codes = []  # 欠損銘柄を記録
+            # 各銘柄のリターンを計算（バルク取得+ベクトル計算）
+            codes = portfolio["code"].tolist()
+            purchase_prices_df = _get_prices_bulk(conn, codes, [purchase_date], use_open=True)
+            sell_prices_df = _get_prices_bulk(conn, codes, [sell_date], use_open=False)
             
-            for _, row in portfolio.iterrows():
-                code = row["code"]
-                weight = row["weight"]
+            # DataFrameにマージ
+            portfolio_with_prices = portfolio.copy()
+            purchase_prices_df = purchase_prices_df.rename(columns={"price": "purchase_price"})
+            sell_prices_df = sell_prices_df.rename(columns={"price": "sell_price"})
+            
+            portfolio_with_prices = portfolio_with_prices.merge(
+                purchase_prices_df[["code", "purchase_price"]], on="code", how="left"
+            )
+            portfolio_with_prices = portfolio_with_prices.merge(
+                sell_prices_df[["code", "sell_price"]], on="code", how="left"
+            )
+            
+            # 欠損銘柄を除外
+            missing_mask = (
+                portfolio_with_prices["purchase_price"].isna() |
+                portfolio_with_prices["sell_price"].isna()
+            )
+            missing_codes = portfolio_with_prices[missing_mask]["code"].tolist()
+            portfolio_valid = portfolio_with_prices[~missing_mask].copy()
+            
+            if portfolio_valid.empty:
+                stock_returns = []
+            else:
+                # 株式分割を考慮（ベクトル計算）
+                split_mults = []
+                for code in portfolio_valid["code"]:
+                    split_mult = _split_multiplier_between(conn, code, purchase_date, sell_date)
+                    split_mults.append(split_mult)
+                portfolio_valid["split_mult"] = split_mults
                 
-                # 購入価格（リバランス日の翌営業日の始値、完全一致）
-                purchase_price = _get_price(conn, code, purchase_date, use_open=True)
-                if purchase_price is None:
-                    missing_codes.append(code)
-                    continue
+                # リターン計算（ベクトル化）
+                portfolio_valid["adjusted_purchase_price"] = (
+                    portfolio_valid["purchase_price"] / portfolio_valid["split_mult"]
+                )
+                portfolio_valid["return_decimal"] = (
+                    portfolio_valid["sell_price"] / portfolio_valid["adjusted_purchase_price"] - 1.0
+                )
                 
-                # 売却価格（次のリバランス日の終値、完全一致）
-                sell_price = _get_price(conn, code, sell_date, use_open=False)
-                if sell_price is None:
-                    missing_codes.append(code)
-                    continue
-                
-                # 株式分割を考慮
-                # 注意: purchase_dateは翌営業日なので、分割計算期間は purchase_date から sell_date まで
-                # （購入日の翌日以降の分割を考慮）
-                split_mult = _split_multiplier_between(conn, code, purchase_date, sell_date)
-                
-                # リターン計算（分割を考慮）
-                # 分割が発生した場合、購入価格を分割後の基準に調整
-                adjusted_purchase_price = purchase_price / split_mult
-                return_decimal = (sell_price / adjusted_purchase_price - 1.0)
-                
-                stock_returns.append({
-                    "code": code,
-                    "weight": weight,
-                    "return_decimal": return_decimal,
-                })
+                # stock_returns形式に変換
+                stock_returns = [
+                    {
+                        "code": row["code"],
+                        "weight": row["weight"],
+                        "return_decimal": row["return_decimal"],
+                    }
+                    for _, row in portfolio_valid.iterrows()
+                ]
             
             # ポートフォリオ全体のグロスリターン（重み付き平均）
             # 【欠損銘柄のウェイト設計: drop_and_renormalize】
@@ -388,8 +710,16 @@ def calculate_timeseries_returns(
                 # TOPIXリターンを計算（open-close方式で統一）
                 # 購入: リバランス日の翌営業日の始値
                 # 売却: 次のリバランス日の終値
-                topix_purchase = _get_topix_price_exact(conn, purchase_date, use_open=True)
-                topix_sell = _get_topix_price_exact(conn, sell_date, use_open=False)
+                # バルク取得を使用（将来的には全期間を一括取得できるが、現状は1回ずつ）
+                topix_prices_df = _get_topix_prices_bulk(conn, [purchase_date, sell_date], use_open=False)
+                topix_purchase_df = _get_topix_prices_bulk(conn, [purchase_date], use_open=True)
+                
+                topix_purchase = None
+                topix_sell = None
+                if not topix_purchase_df.empty and purchase_date in topix_purchase_df["date"].values:
+                    topix_purchase = float(topix_purchase_df[topix_purchase_df["date"] == purchase_date]["price"].iloc[0])
+                if not topix_prices_df.empty and sell_date in topix_prices_df["date"].values:
+                    topix_sell = float(topix_prices_df[topix_prices_df["date"] == sell_date]["price"].iloc[0])
                 
                 if topix_purchase is not None and topix_sell is not None and topix_purchase > 0:
                     topix_return = (topix_sell / topix_purchase - 1.0)
