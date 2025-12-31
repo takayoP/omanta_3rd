@@ -63,4 +63,7 @@ Thumbs.db
 *.html
 !data/Sample/**/*.csv
 
+# Cache files (large data files)
+cache/
+
 
