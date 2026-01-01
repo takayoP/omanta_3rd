@@ -119,6 +119,9 @@ python check_optimization_readiness.py
    
    # 候補群の選定（上位＋分散）
    python evaluate_200trial_results.py --study-name optimization_timeseries_studyB_YYYYMMDD_HHMMSS --select-candidates --output candidates_studyB.json
+   
+   # 候補群の可視化（オプション）
+   python evaluate_200trial_results.py --study-name optimization_timeseries_studyB_YYYYMMDD_HHMMSS --select-candidates --output candidates_studyB.json --visualize --viz-output candidates_studyB_viz.png
    ```
    
    **成功条件（Study B）:**

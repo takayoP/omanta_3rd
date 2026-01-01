@@ -11,15 +11,53 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import optuna
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+import matplotlib
+matplotlib.use('Agg')  # GUI不要のバックエンド
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Study A/Bのパラメータ範囲定義
+PARAM_RANGES = {
+    "A": {
+        "bb_weight": (0.55, 0.90),
+        "roe_min": (0.00, 0.08),
+        "w_value": (0.20, 0.35),
+        "w_forward_per": (0.40, 0.80),
+    },
+    "B": {
+        "bb_weight": (0.40, 0.65),
+        "roe_min": (0.08, 0.15),
+        "w_value": (0.33, 0.50),
+        "w_forward_per": (0.30, 0.55),
+    },
+}
+
+
+def detect_study_type(study: optuna.Study) -> Optional[str]:
+    """
+    Study名からStudy A/Bを判定
+    
+    Args:
+        study: Optunaのスタディ
+    
+    Returns:
+        "A", "B", または None（判定できない場合）
+    """
+    study_name = study.study_name.lower()
+    if "studya" in study_name or "_a_" in study_name:
+        return "A"
+    elif "studyb" in study_name or "_b_" in study_name:
+        return "B"
+    return None
 
 
 def evaluate_200trial_success(
@@ -91,25 +129,70 @@ def evaluate_200trial_success(
     param_ranges = {}
     param_extreme = {}
     
+    # Studyタイプを判定
+    study_type = detect_study_type(study)
+    study_ranges = PARAM_RANGES.get(study_type) if study_type else None
+    
     for param_name in key_params:
         values = [t.params.get(param_name) for t in top10_trials if param_name in t.params]
         if values:
+            param_min = min(values)
+            param_max = max(values)
+            param_range = param_max - param_min
+            
             param_ranges[param_name] = {
-                "min": min(values),
-                "max": max(values),
-                "range": max(values) - min(values),
+                "min": param_min,
+                "max": param_max,
+                "range": param_range,
             }
-            # 極端に端に張り付いていないかチェック（範囲の80%以上に集中していないか）
-            # 実際には、探索範囲の端（0%または100%付近）に張り付いていないかを確認
-            # 簡易版: 範囲が広い（分散がある）場合はOK
-            param_extreme[param_name] = param_ranges[param_name]["range"] < 0.1  # 範囲が0.1未満なら張り付き
+            
+            # 探索範囲に対する相対的な判定
+            if study_ranges and param_name in study_ranges:
+                search_min, search_max = study_ranges[param_name]
+                search_range = search_max - search_min
+                
+                # 相対的な範囲（探索範囲に対する割合）
+                relative_range = param_range / search_range if search_range > 0 else 0.0
+                
+                # 端に張り付いているかのチェック
+                # 1. 相対範囲が20%未満（探索範囲の20%未満に集中）
+                # 2. または、最小値が探索範囲の下限から5%以内、または最大値が探索範囲の上限から5%以内
+                near_lower_bound = (param_min - search_min) / search_range < 0.05 if search_range > 0 else False
+                near_upper_bound = (search_max - param_max) / search_range < 0.05 if search_range > 0 else False
+                
+                param_extreme[param_name] = (
+                    relative_range < 0.20 or  # 相対範囲が狭い
+                    (near_lower_bound and near_upper_bound)  # 両端に張り付いている
+                )
+                
+                param_ranges[param_name]["search_range"] = search_range
+                param_ranges[param_name]["relative_range"] = relative_range
+                param_ranges[param_name]["near_lower_bound"] = near_lower_bound
+                param_ranges[param_name]["near_upper_bound"] = near_upper_bound
+            else:
+                # Studyタイプが判定できない場合は、絶対値で判定（後方互換性）
+                param_extreme[param_name] = param_range < 0.1
     
     print("上位10 trialのパラメータ範囲:")
+    if study_type:
+        print(f"  (Study {study_type}の探索範囲を使用)")
     stability_check = True
     for param_name, range_info in param_ranges.items():
         extreme = param_extreme.get(param_name, False)
         status = "⚠️" if extreme else "✅"
-        print(f"  {status} {param_name}: {range_info['min']:.4f} ～ {range_info['max']:.4f} (範囲: {range_info['range']:.4f})")
+        
+        if "relative_range" in range_info:
+            # 相対範囲が計算されている場合
+            rel_range_pct = range_info["relative_range"] * 100
+            search_range = range_info.get("search_range", "N/A")
+            print(f"  {status} {param_name}: {range_info['min']:.4f} ～ {range_info['max']:.4f} "
+                  f"(範囲: {range_info['range']:.4f}, 探索範囲: {search_range:.4f}, "
+                  f"相対範囲: {rel_range_pct:.1f}%)")
+        else:
+            # 絶対値のみ
+            print(f"  {status} {param_name}: {range_info['min']:.4f} ～ {range_info['max']:.4f} "
+                  f"(範囲: {range_info['range']:.4f})")
+        
         if extreme:
             stability_check = False
     
@@ -183,6 +266,100 @@ def evaluate_200trial_success(
             for t in top10_trials
         ],
     }
+
+
+def visualize_candidates(
+    candidates: List[Dict[str, Any]],
+    output_path: Optional[str] = None,
+    key_params: Optional[List[str]] = None,
+) -> None:
+    """
+    候補群のパラメータ分布を可視化
+    
+    Args:
+        candidates: 候補群のリスト
+        output_path: 保存先パス（Noneの場合は表示のみ）
+        key_params: 可視化するパラメータ（デフォルト: bb_weight, roe_min, w_value, w_forward_per）
+    """
+    if key_params is None:
+        key_params = ["bb_weight", "roe_min", "w_value", "w_forward_per"]
+    
+    if not candidates:
+        print("⚠️ 可視化する候補がありません")
+        return
+    
+    # パラメータデータを抽出
+    param_data = []
+    sharpe_values = []
+    
+    for candidate in candidates:
+        params = {}
+        for param_name in key_params:
+            if param_name in candidate.get("params", {}):
+                params[param_name] = candidate["params"][param_name]
+        
+        if len(params) == len(key_params):
+            param_data.append(params)
+            sharpe_values.append(candidate.get("value", 0.0))
+    
+    if not param_data:
+        print("⚠️ 可視化可能なパラメータデータがありません")
+        return
+    
+    # DataFrameに変換
+    df = pd.DataFrame(param_data)
+    df["sharpe"] = sharpe_values
+    
+    # プロット設定
+    n_params = len(key_params)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+    
+    # 各パラメータの分布をプロット
+    for i, param_name in enumerate(key_params):
+        ax = axes[i]
+        
+        # ヒストグラム
+        ax.hist(df[param_name], bins=10, alpha=0.6, edgecolor='black')
+        ax.set_xlabel(param_name)
+        ax.set_ylabel("頻度")
+        ax.set_title(f"{param_name}の分布")
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"可視化結果を {output_path} に保存しました")
+    else:
+        print("可視化結果を表示します（GUI環境が必要です）")
+        plt.show()
+    
+    plt.close()
+    
+    # ペアプロット（相関関係）
+    try:
+        sns.set_style("whitegrid")
+        pair_plot = sns.pairplot(
+            df,
+            vars=key_params,
+            hue="sharpe",
+            palette="viridis",
+            diag_kind="hist",
+            plot_kws={"alpha": 0.6, "s": 50},
+        )
+        
+        pair_plot_path = output_path.replace(".png", "_pairplot.png") if output_path else None
+        if pair_plot_path:
+            pair_plot.savefig(pair_plot_path, dpi=150, bbox_inches='tight')
+            print(f"ペアプロットを {pair_plot_path} に保存しました")
+        else:
+            print("ペアプロットを表示します（GUI環境が必要です）")
+            plt.show()
+        
+        plt.close()
+    except Exception as e:
+        print(f"⚠️ ペアプロットの生成に失敗しました: {e}")
 
 
 def select_diverse_candidates(
@@ -334,12 +511,34 @@ def main():
     parser.add_argument("--top-n", type=int, default=20, help="上位N trialから選定（デフォルト: 20）")
     parser.add_argument("--select-k", type=int, default=10, help="選定する候補数（デフォルト: 10）")
     parser.add_argument("--output", type=str, help="候補群を保存するJSONファイルパス")
+    parser.add_argument("--visualize", action="store_true", help="候補群の可視化を行う")
+    parser.add_argument("--viz-output", type=str, help="可視化結果の保存先パス（デフォルト: candidates_<study_name>_viz.png）")
     
     args = parser.parse_args()
     
     # ストレージの設定
     if args.storage is None:
-        args.storage = f"sqlite:///optuna_{args.study_name}.db"
+        # 複数の可能性を試す
+        possible_storages = [
+            f"sqlite:///optuna_{args.study_name}.db",
+            f"sqlite:///{Path.cwd() / f'optuna_{args.study_name}.db'}",
+        ]
+        
+        # 既存のDBファイルを探す
+        storage_found = None
+        for storage in possible_storages:
+            # SQLiteのパスを抽出
+            if storage.startswith("sqlite:///"):
+                db_path = storage.replace("sqlite:///", "")
+                if Path(db_path).exists():
+                    storage_found = storage
+                    break
+        
+        if storage_found:
+            args.storage = storage_found
+        else:
+            # デフォルトを使用（エラーは後で発生する）
+            args.storage = possible_storages[0]
     
     print("=" * 80)
     print(f"200 trial結果評価: {args.study_name}")
@@ -354,6 +553,23 @@ def main():
         )
     except Exception as e:
         print(f"❌ スタディの読み込みに失敗しました: {e}")
+        print()
+        print("ヒント:")
+        print(f"  - スタディ名: {args.study_name}")
+        print(f"  - ストレージ: {args.storage}")
+        print(f"  - 現在のディレクトリ: {Path.cwd()}")
+        print()
+        print("利用可能なDBファイルを検索中...")
+        
+        # 現在のディレクトリでDBファイルを検索
+        db_files = list(Path.cwd().glob(f"optuna_{args.study_name}.db"))
+        if db_files:
+            print(f"見つかったDBファイル: {db_files[0]}")
+            print(f"以下のコマンドで再試行してください:")
+            print(f"  python evaluate_200trial_results.py --study-name {args.study_name} --storage sqlite:///{db_files[0]}")
+        else:
+            print("DBファイルが見つかりませんでした。")
+        
         return 1
     
     # 成功条件の評価
@@ -400,6 +616,29 @@ def main():
             
             print(f"候補群を {args.output} に保存しました")
             print()
+        
+        # 可視化
+        if args.visualize:
+            viz_output = args.viz_output
+            if viz_output is None:
+                # デフォルトのパスを生成
+                safe_study_name = args.study_name.replace(":", "_").replace("/", "_")
+                viz_output = f"candidates_{safe_study_name}_viz.png"
+            
+            print("=" * 80)
+            print("候補群の可視化")
+            print("=" * 80)
+            print()
+            
+            try:
+                visualize_candidates(
+                    candidates,
+                    output_path=viz_output,
+                )
+            except Exception as e:
+                print(f"⚠️ 可視化中にエラーが発生しました: {e}")
+                print("可視化をスキップして続行します。")
+                print()
         
         return 0 if eval_result.get("status") in ["SUCCESS", "CAUTION"] else 1
     else:

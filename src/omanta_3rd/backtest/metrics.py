@@ -43,10 +43,17 @@ def calculate_sharpe_ratio(
     """
     シャープレシオを計算
     
+    【重要】monthly_excess_returnsが指定された場合（ベンチマーク超過リターン）:
+    - 通常、これは既にベンチマーク（TOPIX等）を控除済み
+    - この場合、risk_free_rateは引かない（TOPIX超過Sharpe = 情報比率IR相当）
+    - risk_free_rateを引くと「無リスク超過Sharpe」になるが、TOPIX超過とは異なる
+    
     Args:
         monthly_returns: 月次リターンのリスト（小数）
         monthly_excess_returns: 月次超過リターンのリスト（小数、Noneの場合はmonthly_returnsを使用）
+            ※ ベンチマーク超過リターンの場合、risk_free_rateは通常0.0に設定
         risk_free_rate: リスクフリーレート（年率、小数、デフォルト: 0.0）
+            ※ monthly_excess_returns使用時は通常0.0（TOPIX超過Sharpeを計算するため）
         annualize: 年率化するかどうか
     
     Returns:
@@ -54,8 +61,12 @@ def calculate_sharpe_ratio(
     """
     if monthly_excess_returns is not None:
         returns_array = np.array(monthly_excess_returns)
+        # ベンチマーク超過リターンの場合、RFは引かない（TOPIX超過Sharpe = IR相当）
+        # 将来RF≠0にする場合は、関数を分離するか、引数で明示的に指定する必要がある
+        use_rf = False  # 超過リターン使用時はRFを引かない
     else:
         returns_array = np.array(monthly_returns)
+        use_rf = True  # 通常リターンの場合はRFを引く
     
     if len(returns_array) < 2:
         return None
@@ -67,7 +78,11 @@ def calculate_sharpe_ratio(
         return None
     
     # 月次リターンから計算
-    sharpe = (mean_return - risk_free_rate / 12.0) / std_return
+    if use_rf:
+        sharpe = (mean_return - risk_free_rate / 12.0) / std_return
+    else:
+        # 超過リターンの場合、RFは引かない（TOPIX超過Sharpe = 情報比率IR相当）
+        sharpe = mean_return / std_return
     
     # 年率化
     if annualize:

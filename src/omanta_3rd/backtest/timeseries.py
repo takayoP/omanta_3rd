@@ -323,6 +323,8 @@ def calculate_timeseries_returns_from_portfolios(
     monthly_excess_returns = []
     equity_curve = [1.0]
     portfolio_details = []
+    dates_with_data = []  # 実データが存在するリバランス日のみを記録
+    missing_periods_info = []  # スキップされた期間の情報を記録
     
     # コストパラメータの設定
     if buy_cost_bps is None:
@@ -342,24 +344,30 @@ def calculate_timeseries_returns_from_portfolios(
             
             # ポートフォリオを取得（メモリから）
             if rebalance_date not in portfolios:
-                monthly_returns.append(0.0)
-                monthly_excess_returns.append(0.0)
-                equity_curve.append(equity_curve[-1])
+                # ポートフォリオが存在しない場合はスキップ（実データのみを返すため）
+                missing_periods_info.append({
+                    "rebalance_date": rebalance_date,
+                    "reason": "portfolio_not_found",
+                })
                 continue
             
             portfolio = portfolios[rebalance_date].copy()
             if portfolio.empty:
-                monthly_returns.append(0.0)
-                monthly_excess_returns.append(0.0)
-                equity_curve.append(equity_curve[-1])
+                # ポートフォリオが空の場合はスキップ（実データのみを返すため）
+                missing_periods_info.append({
+                    "rebalance_date": rebalance_date,
+                    "reason": "portfolio_empty",
+                })
                 continue
             
             # リバランス日の翌営業日を取得（購入日）
             purchase_date = _get_next_trading_day(conn, rebalance_date)
             if purchase_date is None:
-                monthly_returns.append(0.0)
-                monthly_excess_returns.append(0.0)
-                equity_curve.append(equity_curve[-1])
+                # 購入日が取得できない場合はスキップ（実データのみを返すため）
+                missing_periods_info.append({
+                    "rebalance_date": rebalance_date,
+                    "reason": "purchase_date_not_found",
+                })
                 continue
             
             # 売却日は次のリバランス日（終値で売却）
@@ -470,6 +478,7 @@ def calculate_timeseries_returns_from_portfolios(
                 monthly_returns.append(portfolio_return_net)
                 monthly_excess_returns.append(excess_return)
                 equity_curve.append(equity_curve[-1] * (1.0 + portfolio_return_net))
+                dates_with_data.append(rebalance_date)  # 実データが追加された時だけdatesにも追加
                 
                 portfolio_details.append({
                     "rebalance_date": rebalance_date,
@@ -498,16 +507,22 @@ def calculate_timeseries_returns_from_portfolios(
                         f"（銘柄コード: {missing_codes[:5]}{'...' if len(missing_codes) > 5 else ''}）"
                     )
             else:
-                monthly_returns.append(0.0)
-                monthly_excess_returns.append(0.0)
-                equity_curve.append(equity_curve[-1])
+                # portfolio_valid.emptyの場合、データが取得できないためスキップ（0.0を追加しない）
+                missing_periods_info.append({
+                    "rebalance_date": rebalance_date,
+                    "reason": "no_valid_stocks",
+                    "purchase_date": purchase_date,
+                    "sell_date": sell_date,
+                })
     
     return {
         "monthly_returns": monthly_returns,
         "monthly_excess_returns": monthly_excess_returns,
         "equity_curve": equity_curve,
-        "dates": rebalance_dates,
+        "dates": dates_with_data,  # 実データが存在するリバランス日のみを返す
         "portfolio_details": portfolio_details,
+        "missing_periods_count": len(missing_periods_info),  # スキップされた期間数
+        "missing_periods_info": missing_periods_info,  # スキップされた期間の詳細情報
     }
 
 

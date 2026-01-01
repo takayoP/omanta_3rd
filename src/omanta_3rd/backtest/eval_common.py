@@ -53,10 +53,12 @@ def calculate_metrics_from_timeseries_data(
     volatility = calculate_volatility_timeseries(monthly_returns, annualize=True)
     
     # リスク調整後リターン
+    # 注意: monthly_excess_returnsが指定された場合、これはベンチマーク超過リターン
+    # そのため、risk_free_rate=0.0を指定（TOPIX超過Sharpe = 情報比率IR相当）
     sharpe = calculate_sharpe_ratio(
         monthly_returns,
         monthly_excess_returns,
-        risk_free_rate=0.0,
+        risk_free_rate=0.0,  # 超過リターン使用時はRF=0（TOPIX超過Sharpeを計算）
         annualize=True,
     )
     sortino = calculate_sortino_ratio(

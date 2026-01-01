@@ -88,6 +88,9 @@ python evaluate_200trial_results.py --study-name optimization_timeseries_studyB_
 
 # 候補群の選定（上位＋分散）
 python evaluate_200trial_results.py --study-name optimization_timeseries_studyB_YYYYMMDD_HHMMSS --select-candidates --output candidates_studyB.json
+
+# 候補群の可視化（オプション）
+python evaluate_200trial_results.py --study-name optimization_timeseries_studyB_YYYYMMDD_HHMMSS --select-candidates --output candidates_studyB.json --visualize --viz-output candidates_studyB_viz.png
 ```
 
 #### 成功条件（Study B）
@@ -108,6 +111,22 @@ python evaluate_200trial_results.py --study-name optimization_timeseries_studyB_
 - bb_weight / roe_min / w_value / w_forward_per の4軸で多様性を確保
 - 上位20から10個選ぶなど、分散を考慮した選定
 - これによりHoldoutで生き残る確率が上がる
+
+#### 改善された機能
+
+1. **パラメータ範囲チェックの改善**
+   - 探索範囲に対する相対的な判定を実装
+   - Study A/Bの探索範囲を自動検出して、より正確な判定
+   - 相対範囲が20%未満、または探索範囲の端（5%以内）に張り付いている場合に警告
+
+2. **候補群の可視化機能**
+   - `--visualize`オプションで候補群のパラメータ分布を可視化
+   - ヒストグラムとペアプロットを生成
+   - 分散の確認が容易に
+
+3. **エラーハンドリングの改善**
+   - ストレージパスの自動推定が失敗した場合、利用可能なDBファイルを検索
+   - より詳細なエラーメッセージとヒントを提供
 
 ## Holdout検証とWFA
 

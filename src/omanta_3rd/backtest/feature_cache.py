@@ -275,14 +275,23 @@ class FeatureCache:
             # parquet読み込みを試行
             try:
                 combined_features = pd.read_parquet(cache_path, engine="pyarrow")
-            except (ImportError, ValueError):
+            except (ImportError, ValueError, OSError) as e:
+                # OSError: Repetition level histogram size mismatch などのファイル破損エラー
                 try:
                     combined_features = pd.read_parquet(cache_path, engine="fastparquet")
-                except (ImportError, ValueError):
-                    raise ImportError(
-                        "parquetファイルを読み込むにはpyarrowまたはfastparquetが必要です。"
-                        "インストール: pip install pyarrow または pip install fastparquet"
-                    )
+                except (ImportError, ValueError, OSError):
+                    # エンジンが利用できない、またはファイルが破損している
+                    if isinstance(e, OSError):
+                        raise OSError(
+                            f"キャッシュファイルが破損している可能性があります: {cache_path}\n"
+                            f"エラー: {e}\n"
+                            f"キャッシュを削除して再構築してください: rm {cache_path}"
+                        )
+                    else:
+                        raise ImportError(
+                            "parquetファイルを読み込むにはpyarrowまたはfastparquetが必要です。"
+                            "インストール: pip install pyarrow または pip install fastparquet"
+                        )
         else:
             raise FileNotFoundError(f"キャッシュが見つかりません: {cache_path} または {pickle_path}")
         
