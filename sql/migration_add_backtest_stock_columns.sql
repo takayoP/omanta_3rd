@@ -17,3 +17,7 @@ ADD COLUMN adjusted_current_price REAL;
 
 
 
+
+
+
+

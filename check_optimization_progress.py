@@ -107,3 +107,7 @@ if __name__ == "__main__":
     study_name = "optimization_timeseries_20251230_phase1"
     check_progress(study_name)
 
+
+
+
+

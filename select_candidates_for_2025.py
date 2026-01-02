@@ -46,3 +46,6 @@ with open(output_file, "w", encoding="utf-8") as f:
 
 print(f"候補ファイルを作成しました: {output_file}")
 
+
+
+

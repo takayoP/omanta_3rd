@@ -464,3 +464,7 @@ EVALUATION_TEMPLATE = {
 **作成者**: AI Assistant  
 **最終更新**: 2025-12-31  
 **次回レビュー推奨**: Holdout検証結果が出た時点
+
+
+
+

@@ -77,3 +77,8 @@ python clear_portfolio_performance.py
 # テーブルクリア　確認なしで実行
 python clear_portfolio_performance.py --yes
 
+# holdout評価を再実行
+python evaluate_candidates_holdout.py --candidates candidates_studyB_20251231_174014.json --holdout-start 2023-01-01 --holdout-end 2024-12-31 --cost-bps 0.0 --output holdout_results_with_holdings.json --use-cache
+
+# 可視化
+python visualize_holdings_details.py

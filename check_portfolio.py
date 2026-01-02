@@ -9,3 +9,7 @@ with connect_db() as conn:
         dates_df = pd.read_sql_query('SELECT DISTINCT rebalance_date FROM portfolio_monthly ORDER BY rebalance_date LIMIT 5', conn)
         print(f'Sample dates: {dates_df["rebalance_date"].tolist()}')
 
+
+
+
+

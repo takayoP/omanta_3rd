@@ -286,3 +286,132 @@ CREATE TABLE IF NOT EXISTS index_daily (
   -- 終値
   PRIMARY KEY (date, index_code)
 );
+-- -----------------------
+-- 12) monthly_rebalance_final_selected_candidates : 月次リバランス型 最終選定候補（基本情報とパラメータ）
+-- -----------------------
+CREATE TABLE IF NOT EXISTS monthly_rebalance_final_selected_candidates (
+  trial_number INTEGER PRIMARY KEY,
+  cluster INTEGER,
+  train_sharpe REAL,
+  ranking INTEGER,
+  recommendation_text TEXT,
+  -- パラメータ
+  w_quality REAL,
+  w_growth REAL,
+  w_record_high REAL,
+  w_size REAL,
+  w_value REAL,
+  w_forward_per REAL,
+  roe_min REAL,
+  bb_weight REAL,
+  liquidity_quantile_cut REAL,
+  rsi_base REAL,
+  rsi_max REAL,
+  bb_z_base REAL,
+  bb_z_max REAL,
+  -- メタデータ
+  created_at TEXT,
+  updated_at TEXT
+);
+-- -----------------------
+-- 13) monthly_rebalance_candidate_performance : 月次リバランス型 最終選定候補のパフォーマンス指標
+-- -----------------------
+CREATE TABLE IF NOT EXISTS monthly_rebalance_candidate_performance (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trial_number INTEGER NOT NULL,
+  evaluation_type TEXT NOT NULL,
+  -- 2023-2024 Holdout期間
+  sharpe_excess_0bps REAL,
+  sharpe_excess_10bps REAL,
+  sharpe_excess_20bps REAL,
+  sharpe_excess_30bps REAL,
+  sharpe_excess_2023 REAL,
+  sharpe_excess_2024 REAL,
+  cagr_excess_2023 REAL,
+  cagr_excess_2024 REAL,
+  max_drawdown REAL,
+  max_drawdown_diff REAL,
+  max_drawdown_10bps REAL,
+  max_drawdown_20bps REAL,
+  turnover_annual REAL,
+  sharpe_after_cost_10bps REAL,
+  sharpe_after_cost_20bps REAL,
+  -- 2025疑似ライブ
+  sharpe_excess_2025_10bps REAL,
+  cagr_excess_2025_10bps REAL,
+  max_drawdown_2025 REAL,
+  sharpe_after_cost_2025 REAL,
+  -- メタデータ
+  created_at TEXT,
+  FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number)
+);
+CREATE INDEX IF NOT EXISTS idx_monthly_rebalance_performance_trial 
+  ON monthly_rebalance_candidate_performance(trial_number);
+-- -----------------------
+-- 14) monthly_rebalance_candidate_monthly_returns : 月次リバランス型 最終選定候補の月次超過リターン時系列
+-- -----------------------
+CREATE TABLE IF NOT EXISTS monthly_rebalance_candidate_monthly_returns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trial_number INTEGER NOT NULL,
+  evaluation_period TEXT NOT NULL,
+  -- "holdout_2023_2024" または "holdout_2025"
+  period_date TEXT NOT NULL,
+  -- YYYY-MM-DD（月末日）
+  excess_return REAL,
+  -- 月次超過リターン（小数、例: 0.05 = 5%）
+  created_at TEXT,
+  FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number),
+  UNIQUE(trial_number, evaluation_period, period_date)
+);
+CREATE INDEX IF NOT EXISTS idx_monthly_rebalance_returns_trial_period 
+  ON monthly_rebalance_candidate_monthly_returns(trial_number, evaluation_period);
+-- -----------------------
+-- 15) monthly_rebalance_candidate_detailed_metrics : 月次リバランス型 最終選定候補の詳細パフォーマンス指標
+-- -----------------------
+CREATE TABLE IF NOT EXISTS monthly_rebalance_candidate_detailed_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trial_number INTEGER NOT NULL,
+  evaluation_period TEXT NOT NULL,
+  -- "holdout_2023_2024" または "holdout_2025"
+  cost_bps REAL,
+  -- 取引コスト（bps、0.0, 10.0, 20.0等）
+  -- 基本指標
+  cagr REAL,
+  mean_return REAL,
+  mean_excess_return REAL,
+  total_return REAL,
+  volatility REAL,
+  sharpe_ratio REAL,
+  sortino_ratio REAL,
+  win_rate REAL,
+  profit_factor REAL,
+  -- 詳細指標
+  num_periods INTEGER,
+  num_missing_stocks INTEGER,
+  mean_excess_return_monthly REAL,
+  mean_excess_return_annual REAL,
+  vol_excess_monthly REAL,
+  vol_excess_annual REAL,
+  max_drawdown_topix REAL,
+  turnover_monthly REAL,
+  turnover_annual REAL,
+  num_missing_stocks_total INTEGER,
+  missing_stocks_per_period REAL,
+  missing_handling TEXT,
+  missing_periods_count INTEGER,
+  has_missing_periods INTEGER,
+  -- コスト関連
+  sharpe_excess_after_cost REAL,
+  mean_excess_return_after_cost_monthly REAL,
+  mean_excess_return_after_cost_annual REAL,
+  vol_excess_after_cost_monthly REAL,
+  vol_excess_after_cost_annual REAL,
+  annual_cost_bps REAL,
+  annual_cost_pct REAL,
+  -- メタデータ
+  created_at TEXT,
+  FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number),
+  UNIQUE(trial_number, evaluation_period, cost_bps)
+);
+CREATE INDEX IF NOT EXISTS idx_monthly_rebalance_detailed_metrics_trial_period 
+  ON monthly_rebalance_candidate_detailed_metrics(trial_number, evaluation_period);

@@ -519,3 +519,7 @@ def calculate_profit_factor_timeseries(monthly_returns: List[float]) -> Optional
 **最終更新日**: 2025-12-29  
 **バージョン**: 1.0
 
+
+
+
+

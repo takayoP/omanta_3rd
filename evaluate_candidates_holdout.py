@@ -284,11 +284,103 @@ def evaluate_candidate_holdout(
     # メトリクスに詳細情報を統合
     metrics.update(detailed_metrics)
     
+    # ポートフォリオ情報と保有銘柄詳細を取得
+    portfolio_holdings = _extract_portfolio_holdings(timeseries_data, portfolios)
+    
     return {
         "trial_number": candidate["trial_number"],
         "train_sharpe": candidate.get("value", None),
         "holdout_metrics": metrics,
         "params": params,
+        "portfolio_holdings": portfolio_holdings,  # 追加: ポートフォリオ情報と保有銘柄詳細
+    }
+
+
+def _extract_portfolio_holdings(
+    timeseries_data: Dict[str, Any],
+    portfolios: Dict[str, pd.DataFrame],
+    initial_investment: float = 1000000.0,  # 初期投資額（円、デフォルト100万円）
+) -> Dict[str, Any]:
+    """
+    ポートフォリオ情報と保有銘柄詳細を抽出
+    
+    Args:
+        timeseries_data: calculate_timeseries_returns_from_portfolios()の戻り値
+        portfolios: {rebalance_date: portfolio_df} の辞書
+        initial_investment: 初期投資額（円、保有株数計算に使用）
+    
+    Returns:
+        ポートフォリオ情報と保有銘柄詳細の辞書
+    """
+    portfolio_details = timeseries_data.get("portfolio_details", [])
+    dates = timeseries_data.get("dates", [])
+    
+    holdings_by_period = []
+    
+    # 各リバランス期間の保有銘柄情報を構築
+    for i, rebalance_date in enumerate(dates):
+        period_detail = next(
+            (d for d in portfolio_details if d.get("rebalance_date") == rebalance_date),
+            None
+        )
+        
+        if period_detail is None:
+            continue
+        
+        # 各銘柄の詳細情報を取得（timeseries.pyから取得）
+        stock_details = period_detail.get("stock_details", [])
+        
+        # 基本ポートフォリオ情報
+        holdings_info = {
+            "rebalance_date": rebalance_date,
+            "purchase_date": period_detail.get("purchase_date"),
+            "sell_date": period_detail.get("sell_date"),
+            "stocks": []
+        }
+        
+        # 各銘柄の詳細情報を構築
+        for stock_detail in stock_details:
+            code = stock_detail.get("code")
+            weight = stock_detail.get("weight", 0.0)
+            purchase_price = stock_detail.get("purchase_price")
+            sell_price = stock_detail.get("sell_price")
+            return_pct = stock_detail.get("return_pct", 0.0)
+            
+            # 保有株数を計算（初期投資額 × ウェイト / 購入価格）
+            shares = None
+            investment_amount = None
+            profit_loss = None
+            profit_loss_pct = return_pct
+            
+            if purchase_price is not None and purchase_price > 0:
+                investment_amount = initial_investment * weight
+                shares = investment_amount / purchase_price
+                
+                # 損益を計算（売却価格 - 購入価格）× 株数
+                if sell_price is not None:
+                    profit_loss = (sell_price - purchase_price) * shares
+            
+            stock_info = {
+                "code": code,
+                "weight": weight,
+                "purchase_date": period_detail.get("purchase_date"),
+                "sell_date": period_detail.get("sell_date"),
+                "purchase_price": purchase_price,
+                "sell_price": sell_price,
+                "shares": shares,
+                "investment_amount": investment_amount,  # 投資額（円）
+                "return_pct": return_pct,  # 損益率（%）
+                "profit_loss": profit_loss,  # 損益（円）
+                "split_multiplier": stock_detail.get("split_multiplier", 1.0),
+            }
+            
+            holdings_info["stocks"].append(stock_info)
+        
+        holdings_by_period.append(holdings_info)
+    
+    return {
+        "holdings_by_period": holdings_by_period,
+        "initial_investment": initial_investment,
     }
 
 

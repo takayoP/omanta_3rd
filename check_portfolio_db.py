@@ -34,3 +34,7 @@ with connect_db() as conn:
     else:
         print("\n❌ ポートフォリオが見つかりませんでした")
 
+
+
+
+

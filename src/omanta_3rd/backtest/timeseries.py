@@ -480,6 +480,20 @@ def calculate_timeseries_returns_from_portfolios(
                 equity_curve.append(equity_curve[-1] * (1.0 + portfolio_return_net))
                 dates_with_data.append(rebalance_date)  # 実データが追加された時だけdatesにも追加
                 
+                # 各銘柄の詳細情報を抽出
+                stock_details = []
+                for _, row in portfolio_valid.iterrows():
+                    stock_details.append({
+                        "code": row["code"],
+                        "weight": float(row["weight"]),
+                        "purchase_price": float(row["purchase_price"]),
+                        "sell_price": float(row["sell_price"]),
+                        "split_multiplier": float(row["split_mult"]),
+                        "adjusted_purchase_price": float(row["adjusted_purchase_price"]),
+                        "return_decimal": float(row["return_decimal"]),
+                        "return_pct": float(row["return_decimal"]) * 100.0,  # %換算
+                    })
+                
                 portfolio_details.append({
                     "rebalance_date": rebalance_date,
                     "purchase_date": purchase_date,
@@ -497,6 +511,7 @@ def calculate_timeseries_returns_from_portfolios(
                     "executed_turnover": executed_turnover,
                     "paper_turnover": paper_turnover,
                     "cost_frac": cost_frac,
+                    "stock_details": stock_details,  # 追加: 各銘柄の詳細情報
                 })
                 
                 previous_portfolio = portfolio.copy()

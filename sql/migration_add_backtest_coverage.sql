@@ -8,3 +8,7 @@ ADD COLUMN num_stocks_with_return INTEGER;
 ALTER TABLE backtest_performance 
 ADD COLUMN weight_coverage REAL;
 
+
+
+
+

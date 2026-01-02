@@ -31,20 +31,49 @@ TOPIXデータは J-Quants API を通じて取得し、`index_daily` テーブ�
 
 ---
 
-## 2. 運用スタイル（2つのモードを併走し、最終形はこれから決める）
+## 2. 運用スタイル（2つのモードを併存運用）
 
-本プロジェクトでは、当初の「中長期積立（NISA想定）」の方針を維持しつつ、  
-**月次リバランス運用**も検討・検証していきます。最終的にどちらを採用するかは、今後の検証結果で判断します。
+本プロジェクトでは、**長期保有型（NISA想定）**と**月次リバランス型**の2つの運用スタイルを併存して運用します。  
+両者は異なる目的と評価方法を持ち、データベース上でも明確に区別されます。
 
-### 2.1 モードA：中長期（NISA想定）積立・買い増し
-- 目的：**永続的競争優位性（ワイドモート）**が期待できる企業を、割安な局面で購入し、積立・長期保有を目指す
-- 使い方：
+### 2.1 長期保有型（NISA想定）積立・買い増し
+- **目的**：**永続的競争優位性（ワイドモート）**が期待できる企業を、割安な局面で購入し、積立・長期保有を目指す
+- **入替頻度**：低頻度（月次〜四半期の定期点検）
+- **使い方**：
+  - `monthly_run.py` でスクリーニング結果を取得
   - スクリーニング結果を「買い増し候補」「監視リスト」として活用
-  - 入替は頻繁に行わず、定期点検（例：月次〜四半期）で判断
+  - `holdings` テーブルで実際の保有銘柄を管理
+  - `backtest.py` でパフォーマンス評価
+- **データ保存先**：
+  - `holdings`: 実際の保有銘柄
+  - `backtest_performance`: パフォーマンス結果
+  - `backtest_stock_performance`: 銘柄別パフォーマンス
 
-### 2.2 モードB：月次リバランス（検証中）
-- 目的：スクリーニング上位銘柄を定期的に入替し、**時系列の超過リターン（vs TOPIX）**を狙う
-- 特徴：検証のために、実運用の制約（現金余力）を反映した **open-close 方式**の売買定義を採用
+### 2.2 月次リバランス型
+- **目的**：スクリーニング上位銘柄を定期的に入替し、**時系列の超過リターン（vs TOPIX）**を狙う
+- **入替頻度**：高頻度（月次で全入れ替え）
+- **特徴**：検証のために、実運用の制約（現金余力）を反映した **open-close 方式**の売買定義を採用
+- **データ保存先**：
+  - `portfolio_monthly`: 月次ポートフォリオ（確定結果）
+  - `monthly_rebalance_*`: 月次リバランス型専用テーブル（接頭辞付き）
+
+#### データベーステーブルの命名規則
+
+月次リバランス型のテーブルには `monthly_rebalance_` という接頭辞を付けます。  
+これにより、長期保有型と月次リバランス型のデータを明確に区別できます。
+
+**月次リバランス型専用テーブル**：
+- `monthly_rebalance_final_selected_candidates`: 最終選定候補（基本情報とパラメータ）
+- `monthly_rebalance_candidate_performance`: パフォーマンス指標
+- `monthly_rebalance_candidate_monthly_returns`: 月次超過リターン時系列
+- `monthly_rebalance_candidate_detailed_metrics`: 詳細パフォーマンス指標
+
+**共通テーブル**（両方で使用）：
+- `listed_info`: 銘柄属性
+- `prices_daily`: 日足価格データ
+- `fins_statements`: 財務データ
+- `features_monthly`: 月次特徴量
+- `index_daily`: 指数データ（TOPIX）
 
 #### open-close方式（時系列バックテストの標準仕様）
 - **意思決定**：リバランス日 `t` の時点で新ポートフォリオ（上位N銘柄）を確定
@@ -56,15 +85,21 @@ TOPIXデータは J-Quants API を通じて取得し、`index_daily` テーブ�
 > 補足：現金余力が無い前提のため、毎月「全売却→全買付」になる実装（保守的なコスト仮定）です。  
 > 将来的に「同一銘柄は持ち越す」運用に拡張する余地もあります。
 
+> **詳細なシステム構成については `SYSTEM_SPECIFICATION.md` を参照してください。**
+
 ---
 
 ## 3. システム構成（概要）
 
 - **データ**：J-Quants API  
-- **DB**：SQLite（将来PostgreSQL移行の余地あり）
+- **DB**：SQLite（`C:\Users\takay\AppData\Local\omanta_3rd\db\jquants.sqlite`）
+  - 長期保有型と月次リバランス型のデータを同じデータベースで管理
+  - 月次リバランス型のテーブルには `monthly_rebalance_` 接頭辞を付与
 - **思想**：
   - 過学習を避け、解釈可能性を重視
   - 「最適化結果（in-sample）＝性能」ではなく、OOS検証（holdout / WFA）で信頼性を評価
+
+> **詳細なシステム構成、データフロー、実行コマンドについては `SYSTEM_SPECIFICATION.md` を参照してください。**
 
 ---
 
@@ -206,9 +241,17 @@ python -m omanta_3rd.jobs.optimize_timeseries \
 
 ## 付録：関連ドキュメント
 
+### システム全体
+- `SYSTEM_SPECIFICATION.md`：**システム仕様書**（構成、データフロー、実行コマンド、データベーススキーマ）
+
+### 最適化・評価
 - `OPTIMIZATION_SYSTEM_OVERVIEW.md`：最適化システム全体像
 - `OPTIMIZATION_RESULT_INTERPRETATION.md`：最適化結果の解釈と次のステップ
 - `OPTIMIZATION_EXECUTION_EXAMPLES.md`：最適化実行例（並列化・高速化対応版）
 - `PERFORMANCE_CALCULATION_METHODS.md`：パフォーマンス計算方法の比較（旧方式 / 時系列方式）
 - `TIMESERIES_REFINEMENT_PLAN.md`：時系列バックテストの設計・改善履歴
+- `TRADING_COST_DOCUMENTATION.md`：取引コストの扱い
+
+### 結果・分析
+- `FINAL_SELECTED_CANDIDATES.md`：最終選定候補の情報
 

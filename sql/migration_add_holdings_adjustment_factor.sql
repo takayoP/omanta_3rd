@@ -10,3 +10,7 @@ ADD COLUMN adjustment_factor REAL;
 -- 例: 1:3分割の場合、adjustment_factor = 3.0
 -- 購入日から評価日までの分割倍率 = ∏(1 / prices_daily.adjustment_factor)
 
+
+
+
+

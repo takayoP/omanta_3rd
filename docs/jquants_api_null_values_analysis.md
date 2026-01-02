@@ -82,3 +82,7 @@ def _to_float(value: Any) -> Optional[float]:
 - J-Quants API公式ドキュメント: https://jpx-jquants.com/ja/spec/
 - 財務データ欠損値の対処法: `docs/missing_values_handling_strategy.md`
 
+
+
+
+
