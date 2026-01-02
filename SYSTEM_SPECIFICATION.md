@@ -17,7 +17,8 @@
 |------|-----------|-----------------|
 | 目的 | NISA想定の長期積立・買い増し | 時系列の超過リターン（vs TOPIX） |
 | 入替頻度 | 頻繁に行わず、定期点検（月次〜四半期） | 月次で全入れ替え |
-| 主なテーブル | `holdings` | `portfolio_monthly`、`monthly_rebalance_*` |
+| 主なテーブル | `holdings`、`portfolio_monthly` | `monthly_rebalance_portfolio`、`monthly_rebalance_*` |
+| ポートフォリオ保存先 | `portfolio_monthly`（最適化時の一時保存、参考情報） | `monthly_rebalance_portfolio`（確定結果） |
 | 実行スクリプト | `monthly_run.py`（スクリーニング結果を参考） | `optimize_timeseries.py`、`evaluate_candidates_holdout.py` |
 
 ---
@@ -95,11 +96,17 @@ omanta_3rd/
 | `backtest_performance` | バックテストパフォーマンス結果 | 長期保有型のパフォーマンス評価 |
 | `backtest_stock_performance` | バックテスト銘柄別パフォーマンス | 長期保有型の個別銘柄評価 |
 
-#### 2.2.3 月次リバランス型専用テーブル（`monthly_rebalance_`接頭辞）
+#### 2.2.3 長期保有型専用テーブル（追加）
 
 | テーブル名 | 説明 | 主な用途 |
 |-----------|------|---------|
-| `portfolio_monthly` | 月次ポートフォリオ（確定結果） | 月次リバランス型のポートフォリオ選定結果 |
+| `portfolio_monthly` | 月次ポートフォリオ | 長期保有型のポートフォリオ保存<br>- 最適化時の一時保存（最適化後は削除）<br>- `monthly_run.py`実行時の参考情報として保存 |
+
+#### 2.2.4 月次リバランス型専用テーブル（`monthly_rebalance_`接頭辞）
+
+| テーブル名 | 説明 | 主な用途 |
+|-----------|------|---------|
+| `monthly_rebalance_portfolio` | 月次リバランス型専用ポートフォリオ | 月次リバランス型の確定結果として保存 |
 | `monthly_rebalance_final_selected_candidates` | 最終選定候補（基本情報とパラメータ） | 月次リバランス型の最適化結果 |
 | `monthly_rebalance_candidate_performance` | 最終選定候補のパフォーマンス指標 | 月次リバランス型のパフォーマンス集計 |
 | `monthly_rebalance_candidate_monthly_returns` | 月次超過リターン時系列 | 月次リバランス型の時系列データ |
@@ -324,7 +331,25 @@ python save_performance_time_series_to_db.py
 - `entry_score`: エントリースコア（BB/RSI）
 
 #### `portfolio_monthly`
-月次ポートフォリオの確定結果。**月次リバランス型で使用**されます。
+長期保有型用の月次ポートフォリオ。
+
+**用途**:
+- 最適化時（`optimize_longterm.py`）: 一時的に保存され、パフォーマンス計算後に削除されます
+- 月次実行時（`monthly_run.py`）: 参考情報として保存されます
+
+主要カラム：
+- `rebalance_date`: リバランス日（YYYY-MM-DD）
+- `code`: 銘柄コード
+- `weight`: ウェイト
+- `core_score`: スコア
+- `entry_score`: エントリースコア
+
+#### `monthly_rebalance_portfolio`
+月次リバランス型専用のポートフォリオテーブル。
+
+**用途**:
+- 月次リバランス型の確定結果として保存されます
+- `optimize_timeseries.py`で最適化されたポートフォリオを保存します
 
 主要カラム：
 - `rebalance_date`: リバランス日（YYYY-MM-DD）
@@ -396,7 +421,7 @@ python save_performance_time_series_to_db.py
 
 | 項目 | 長期保有型 | 月次リバランス型 |
 |------|-----------|-----------------|
-| ポートフォリオ保存先 | `portfolio_monthly`（参考情報） | `portfolio_monthly`（確定結果） |
+| ポートフォリオ保存先 | `portfolio_monthly`（参考情報、または最適化時の一時保存） | `monthly_rebalance_portfolio`（確定結果） |
 | パフォーマンス保存先 | `backtest_performance` | `monthly_rebalance_candidate_performance` |
 | テーブル命名規則 | 接頭辞なし | `monthly_rebalance_`接頭辞 |
 

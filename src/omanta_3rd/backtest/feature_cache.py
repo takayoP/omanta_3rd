@@ -82,7 +82,17 @@ class FeatureCache:
             return {}
         
         start_date = rebalance_dates[0]
-        end_date = rebalance_dates[-1]
+        # 重要: 最後のリバランス日の翌営業日まで含める（購入価格取得用）
+        # キャッシュファイル名はリバランス日の範囲を使用するが、
+        # 実際のデータ取得範囲は翌営業日まで含める
+        last_rebalance_date = rebalance_dates[-1]
+        with connect_db(read_only=True) as conn:
+            from ..backtest.performance import _get_next_trading_day
+            next_trading_day = _get_next_trading_day(conn, last_rebalance_date)
+            # 翌営業日が存在する場合はそれを使用、存在しない場合は最後のリバランス日を使用
+            end_date_for_data = next_trading_day if next_trading_day else last_rebalance_date
+        # キャッシュファイル名はリバランス日の範囲を使用（既存キャッシュとの互換性のため）
+        end_date = last_rebalance_date
         
         cache_path = self._get_cache_path(start_date, end_date)
         prices_cache_path = self._get_prices_cache_path(start_date, end_date)
@@ -123,7 +133,7 @@ class FeatureCache:
             # 並列実行
             with ProcessPoolExecutor(max_workers=n_jobs) as executor:
                 futures = {
-                    executor.submit(self._build_features_single, rebalance_date): rebalance_date
+                    executor.submit(self._build_features_single, rebalance_date, end_date_for_data): rebalance_date
                     for rebalance_date in rebalance_dates
                 }
                 
@@ -144,7 +154,7 @@ class FeatureCache:
             # 逐次実行
             for rebalance_date in rebalance_dates:
                 try:
-                    result = self._build_features_single(rebalance_date)
+                    result = self._build_features_single(rebalance_date, end_date_for_data)
                     if result is not None:
                         feat, prices = result
                         if feat is not None and not feat.empty:
@@ -167,8 +177,13 @@ class FeatureCache:
         return features_dict, prices_dict
     
     @staticmethod
-    def _build_features_single(rebalance_date: str) -> Optional[tuple]:
-        """単一のrebalance_dateの特徴量を計算（並列化用）"""
+    def _build_features_single(rebalance_date: str, end_date_for_data: Optional[str] = None) -> Optional[tuple]:
+        """単一のrebalance_dateの特徴量を計算（並列化用）
+        
+        Args:
+            rebalance_date: リバランス日
+            end_date_for_data: 価格データ取得の終了日（Noneの場合はリバランス日の翌営業日を自動計算）
+        """
         try:
             with connect_db(read_only=True) as conn:
                 feat = build_features(conn, rebalance_date)
@@ -178,8 +193,21 @@ class FeatureCache:
             
             # 価格データも取得（entry_score計算用）
             # build_features内で使用される価格データを再取得
+            # 重要: リバランス日の翌営業日までのデータも含める（購入価格取得用）
             price_date = feat["as_of_date"].iloc[0]
             with connect_db(read_only=True) as conn:
+                # 価格データ取得の終了日を決定
+                if end_date_for_data:
+                    # 明示的に指定された場合はそれを使用（最後のリバランス日の翌営業日）
+                    price_end_date = end_date_for_data
+                else:
+                    # リバランス日の翌営業日を取得
+                    from ..backtest.performance import _get_next_trading_day
+                    next_trading_day = _get_next_trading_day(conn, price_date)
+                    # 翌営業日が存在する場合はそれを使用、存在しない場合はリバランス日を使用
+                    price_end_date = next_trading_day if next_trading_day else price_date
+                
+                # 価格データを取得（翌営業日まで含む）
                 prices_win = pd.read_sql_query(
                     """
                     SELECT code, date, adj_close
@@ -188,7 +216,7 @@ class FeatureCache:
                     ORDER BY code, date
                     """,
                     conn,
-                    params=(price_date,),
+                    params=(price_end_date,),
                 )
             
             # 各銘柄の終値系列を辞書形式で保存

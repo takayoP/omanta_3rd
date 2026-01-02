@@ -189,7 +189,7 @@ def _get_rebalance_dates(conn, start_date: str, end_date: str) -> List[str]:
     df = pd.read_sql_query(
         """
         SELECT DISTINCT rebalance_date
-        FROM portfolio_monthly
+        FROM monthly_rebalance_portfolio
         WHERE rebalance_date >= ? AND rebalance_date <= ?
         ORDER BY rebalance_date ASC
         """,
@@ -213,7 +213,7 @@ def _get_portfolio(conn, rebalance_date: str) -> pd.DataFrame:
     return pd.read_sql_query(
         """
         SELECT code, weight
-        FROM portfolio_monthly
+        FROM monthly_rebalance_portfolio
         WHERE rebalance_date = ?
         """,
         conn,

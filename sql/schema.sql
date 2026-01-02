@@ -114,9 +114,22 @@ CREATE TABLE IF NOT EXISTS features_monthly (
   PRIMARY KEY (as_of_date, code)
 );
 -- -----------------------
--- 5) portfolio_monthly : 月次ポートフォリオ（確定結果）
+-- 5) portfolio_monthly : 月次ポートフォリオ（長期保有型用）
 -- -----------------------
 CREATE TABLE IF NOT EXISTS portfolio_monthly (
+  rebalance_date TEXT NOT NULL,
+  code TEXT NOT NULL,
+  weight REAL NOT NULL,
+  core_score REAL,
+  entry_score REAL,
+  reason TEXT,
+  -- JSON文字列など（採用理由）
+  PRIMARY KEY (rebalance_date, code)
+);
+-- -----------------------
+-- 5-2) monthly_rebalance_portfolio : 月次リバランス型専用ポートフォリオ
+-- -----------------------
+CREATE TABLE IF NOT EXISTS monthly_rebalance_portfolio (
   rebalance_date TEXT NOT NULL,
   code TEXT NOT NULL,
   weight REAL NOT NULL,

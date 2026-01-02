@@ -44,6 +44,7 @@ from ..jobs.monthly_run import (
     select_portfolio,
     save_features,
     save_portfolio,
+    save_portfolio_for_rebalance,
 )
 from ..backtest.timeseries import calculate_timeseries_returns, calculate_timeseries_returns_from_portfolios
 from ..backtest.metrics import (
@@ -171,7 +172,7 @@ def run_backtest_for_optimization_timeseries(
     if save_to_db:
         with connect_db() as conn:
             for rebalance_date, portfolio_df in portfolios.items():
-                save_portfolio(conn, portfolio_df)
+                save_portfolio_for_rebalance(conn, portfolio_df)
     save_end_time = time.time()
     timing_info["save_time"] = save_end_time - save_start_time if save_to_db else 0.0
     

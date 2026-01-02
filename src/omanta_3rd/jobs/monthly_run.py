@@ -1873,6 +1873,9 @@ def save_features(conn, feat: pd.DataFrame):
 
 
 def save_portfolio(conn, pf: pd.DataFrame):
+    """
+    長期保有型用のポートフォリオ保存（portfolio_monthlyテーブルに保存）
+    """
     if pf.empty:
         return
     rebalance_date = pf["rebalance_date"].iloc[0]
@@ -1881,6 +1884,20 @@ def save_portfolio(conn, pf: pd.DataFrame):
 
     rows = pf.to_dict("records")
     upsert(conn, "portfolio_monthly", rows, conflict_columns=["rebalance_date", "code"])
+
+
+def save_portfolio_for_rebalance(conn, pf: pd.DataFrame):
+    """
+    月次リバランス型用のポートフォリオ保存（monthly_rebalance_portfolioテーブルに保存）
+    """
+    if pf.empty:
+        return
+    rebalance_date = pf["rebalance_date"].iloc[0]
+    conn.execute("DELETE FROM monthly_rebalance_portfolio WHERE rebalance_date = ?", (rebalance_date,))
+    conn.commit()
+
+    rows = pf.to_dict("records")
+    upsert(conn, "monthly_rebalance_portfolio", rows, conflict_columns=["rebalance_date", "code"])
     conn.commit()  # upsert後にコミットを追加
 
 

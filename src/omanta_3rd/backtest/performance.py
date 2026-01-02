@@ -13,7 +13,14 @@ from ..ingest.indices import TOPIX_CODE
 
 def _get_next_trading_day(conn, date: str) -> Optional[str]:
     """
-    指定日付の翌営業日を取得（価格データが存在する最初の日付）
+    指定日付の翌営業日を取得（価格データが存在する最初の営業日）
+    
+    重要: 日本の株式市場は月〜金が営業日（weekday 0-4）です。
+          データベースに非営業日のデータが含まれている場合でも、
+          実際の営業日（月〜金）のみを返します。
+    
+    さらに、価格データ（openまたはclose）がNULLでない日付のみを返します。
+    これは、データベースにレコードが存在しても価格データがNULLの場合があるためです。
     
     Args:
         conn: データベース接続
@@ -22,20 +29,39 @@ def _get_next_trading_day(conn, date: str) -> Optional[str]:
     Returns:
         翌営業日（YYYY-MM-DD）、存在しない場合はNone
     """
-    next_date_df = pd.read_sql_query(
+    from datetime import datetime
+    
+    # データベースから、基準日より後の日付で、価格データ（openまたはclose）がNULLでない日付を取得
+    # 最大7日分を確認
+    next_dates_df = pd.read_sql_query(
         """
-        SELECT MIN(date) AS next_date
+        SELECT DISTINCT date
         FROM prices_daily
         WHERE date > ?
+          AND (open IS NOT NULL OR close IS NOT NULL)
+        ORDER BY date
+        LIMIT 7
         """,
         conn,
         params=(date,),
     )
     
-    if next_date_df.empty or pd.isna(next_date_df["next_date"].iloc[0]):
+    if next_dates_df.empty:
         return None
     
-    return str(next_date_df["next_date"].iloc[0])
+    # 実際の営業日（月〜金、weekday 0-4）を探す
+    for _, row in next_dates_df.iterrows():
+        candidate_date = str(row["date"])
+        dt = datetime.strptime(candidate_date, "%Y-%m-%d")
+        weekday = dt.weekday()  # 0=月曜日, 4=金曜日, 5=土曜日, 6=日曜日
+        
+        # 月〜金（weekday 0-4）が営業日
+        if weekday < 5:
+            return candidate_date
+    
+    # 7日以内に営業日が見つからない場合（通常は発生しない）
+    # 最初の日付を返す（フォールバック）
+    return str(next_dates_df.iloc[0]["date"])
 
 
 def _get_topix_price(conn, date: str, use_open: bool = False) -> Optional[float]:
@@ -138,6 +164,7 @@ def _split_multiplier_between(conn, code: str, start_date: str, end_date: str) -
 def calculate_portfolio_performance(
     rebalance_date: str,
     as_of_date: Optional[str] = None,
+    portfolio_table: str = "portfolio_monthly",
 ) -> Dict[str, Any]:
     """
     指定されたrebalance_dateのポートフォリオのパフォーマンスを計算
@@ -145,6 +172,9 @@ def calculate_portfolio_performance(
     Args:
         rebalance_date: リバランス日（YYYY-MM-DD）
         as_of_date: 評価日（YYYY-MM-DD、Noneの場合は最新の価格データを使用）
+        portfolio_table: ポートフォリオテーブル名（デフォルト: "portfolio_monthly"）
+                         長期保有型: "portfolio_monthly"
+                         月次リバランス型: "monthly_rebalance_portfolio"
         
     Returns:
         パフォーマンス情報の辞書
@@ -152,9 +182,9 @@ def calculate_portfolio_performance(
     with connect_db() as conn:
         # ポートフォリオを取得
         portfolio = pd.read_sql_query(
-            """
+            f"""
             SELECT code, weight, core_score, entry_score
-            FROM portfolio_monthly
+            FROM {portfolio_table}
             WHERE rebalance_date = ?
             """,
             conn,
@@ -200,33 +230,97 @@ def calculate_portfolio_performance(
         # 各銘柄のリバランス日の翌営業日の始値を取得（購入価格）
         # 注意: 購入価格が取得できない銘柄はrebalance_priceがNaNになり、
         #       後続のreturn_pct計算でNaNになる（欠損値として扱われる）
+        # 重要: 始値（open）がNULLの場合は終値（close）をフォールバックとして使用
         rebalance_prices = []
         missing_buy_prices = []
         for code in portfolio["code"]:
             price_row = pd.read_sql_query(
                 """
-                SELECT open
+                SELECT open, close
                 FROM prices_daily
                 WHERE code = ? AND date = ?
                 """,
                 conn,
                 params=(code, next_trading_day),
             )
-            if not price_row.empty and price_row["open"].iloc[0] is not None:
-                rebalance_prices.append({
-                    "code": code,
-                    "rebalance_price": price_row["open"].iloc[0],
-                })
+            if not price_row.empty:
+                # 始値がNULLの場合は終値をフォールバックとして使用
+                buy_price = price_row["open"].iloc[0]
+                if buy_price is None or pd.isna(buy_price):
+                    buy_price = price_row["close"].iloc[0]
+                
+                if buy_price is not None and not pd.isna(buy_price):
+                    rebalance_prices.append({
+                        "code": code,
+                        "rebalance_price": buy_price,
+                    })
+                else:
+                    missing_buy_prices.append(code)
             else:
                 missing_buy_prices.append(code)
         
         if missing_buy_prices:
             print(
-                f"警告: {len(missing_buy_prices)}銘柄で購入価格が取得できませんでした。"
-                f"（銘柄コード: {missing_buy_prices[:5]}{'...' if len(missing_buy_prices) > 5 else ''}）"
+                f"警告: {rebalance_date}のリバランスで{len(missing_buy_prices)}銘柄で購入価格が取得できませんでした。"
+                f"（銘柄コード: {missing_buy_prices[:5]}{'...' if len(missing_buy_prices) > 5 else ''}, "
+                f"翌営業日: {next_trading_day}）"
             )
+            # デバッグ用: 翌営業日に価格データがある銘柄の数を確認
+            all_codes_count = pd.read_sql_query(
+                """
+                SELECT COUNT(DISTINCT code) as count
+                FROM prices_daily
+                WHERE date = ?
+                """,
+                conn,
+                params=(next_trading_day,),
+            )
+            print(
+                f"  デバッグ: 翌営業日 {next_trading_day} に価格データがある全銘柄数: "
+                f"{all_codes_count['count'].iloc[0] if not all_codes_count.empty else 0}"
+            )
+            # ポートフォリオの銘柄が翌営業日に存在するか確認
+            portfolio_codes = portfolio["code"].tolist()
+            if portfolio_codes:
+                portfolio_codes_str = "','".join(portfolio_codes)
+                portfolio_codes_count = pd.read_sql_query(
+                    f"""
+                    SELECT COUNT(DISTINCT code) as count
+                    FROM prices_daily
+                    WHERE date = ?
+                      AND code IN ('{portfolio_codes_str}')
+                    """,
+                    conn,
+                    params=(next_trading_day,),
+                )
+                print(
+                    f"  デバッグ: ポートフォリオの銘柄のうち、翌営業日に価格データがある銘柄数: "
+                    f"{portfolio_codes_count['count'].iloc[0] if not portfolio_codes_count.empty else 0}/{len(portfolio_codes)}"
+                )
+                # データが存在しない銘柄のリストも表示
+                missing_codes_in_db = []
+                for code in portfolio_codes:
+                    code_check = pd.read_sql_query(
+                        "SELECT COUNT(*) as count FROM prices_daily WHERE code = ? AND date = ?",
+                        conn,
+                        params=(code, next_trading_day),
+                    )
+                    if code_check.empty or code_check["count"].iloc[0] == 0:
+                        missing_codes_in_db.append(code)
+                if missing_codes_in_db:
+                    print(
+                        f"  デバッグ: 翌営業日にデータが存在しない銘柄: {missing_codes_in_db[:10]}{'...' if len(missing_codes_in_db) > 10 else ''}"
+                    )
+            else:
+                print("  デバッグ: ポートフォリオが空です")
         
-        rebalance_prices_df = pd.DataFrame(rebalance_prices)
+        # rebalance_pricesが空の場合でも、codeカラムを持つDataFrameを作成
+        if rebalance_prices:
+            rebalance_prices_df = pd.DataFrame(rebalance_prices)
+        else:
+            # 空のDataFrameでもcodeカラムを持つようにする
+            rebalance_prices_df = pd.DataFrame(columns=["code", "rebalance_price"])
+        
         portfolio = portfolio.merge(rebalance_prices_df, on="code", how="left")
         
         # 各銘柄の現在価格を取得（終値を使用）
@@ -331,10 +425,11 @@ def calculate_portfolio_performance(
             missing_count = num_total - num_valid
             missing_weight = total_weight - valid_weight_sum
             print(
-                f"警告: ポートフォリオの品質が低い可能性があります。"
+                f"警告: {rebalance_date}のポートフォリオの品質が低い可能性があります。"
                 f"欠損銘柄数={missing_count}/{num_total}, "
                 f"欠損weight={missing_weight:.4f}/{total_weight:.4f}, "
-                f"coverage={coverage:.4f}"
+                f"coverage={coverage:.4f}, "
+                f"翌営業日: {next_trading_day}"
             )
         
         # TOPIX比較: 購入日と評価日のTOPIX価格を取得
@@ -416,12 +511,16 @@ def calculate_portfolio_performance(
 
 def calculate_all_portfolios_performance(
     as_of_date: Optional[str] = None,
+    portfolio_table: str = "portfolio_monthly",
 ) -> List[Dict[str, Any]]:
     """
     すべてのポートフォリオのパフォーマンスを計算
     
     Args:
         as_of_date: 評価日（YYYY-MM-DD、Noneの場合は最新の価格データを使用）
+        portfolio_table: ポートフォリオテーブル名（デフォルト: "portfolio_monthly"）
+                         長期保有型: "portfolio_monthly"
+                         月次リバランス型: "monthly_rebalance_portfolio"
         
     Returns:
         各ポートフォリオのパフォーマンス情報のリスト
@@ -429,9 +528,9 @@ def calculate_all_portfolios_performance(
     with connect_db() as conn:
         # すべてのrebalance_dateを取得
         rebalance_dates = pd.read_sql_query(
-            """
+            f"""
             SELECT DISTINCT rebalance_date
-            FROM portfolio_monthly
+            FROM {portfolio_table}
             ORDER BY rebalance_date
             """,
             conn,
@@ -439,7 +538,7 @@ def calculate_all_portfolios_performance(
         
         results = []
         for rebalance_date in rebalance_dates:
-            perf = calculate_portfolio_performance(rebalance_date, as_of_date)
+            perf = calculate_portfolio_performance(rebalance_date, as_of_date, portfolio_table)
             results.append(perf)
         
         return results
