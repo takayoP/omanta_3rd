@@ -615,25 +615,66 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    result = test_seed_robustness_fixed_horizon(
-        json_file=args.json_file,
-        start_date=args.start,
-        end_date=args.end,
-        horizon_months=args.horizon,
-        n_seeds=args.n_seeds,
-        train_ratio=args.train_ratio,
-        cost_bps=args.cost_bps,
-        cache_dir=args.cache_dir,
-        n_jobs=args.n_jobs,
-    )
+    try:
+        result = test_seed_robustness_fixed_horizon(
+            json_file=args.json_file,
+            start_date=args.start,
+            end_date=args.end,
+            horizon_months=args.horizon,
+            n_seeds=args.n_seeds,
+            train_ratio=args.train_ratio,
+            cost_bps=args.cost_bps,
+            cache_dir=args.cache_dir,
+            n_jobs=args.n_jobs,
+        )
+        
+        # 結果をJSONファイルに保存
+        if args.output is None:
+            output_file = f"seed_robustness_fixed_horizon_{args.horizon}M.json"
+        else:
+            output_file = args.output
+        
+        try:
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            print(f"結果を保存しました: {output_file}")
+        except Exception as e:
+            print(f"❌ 結果の保存中にエラーが発生しました: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        
+        print()
+        print("=" * 80)
+        print("✅ 処理が正常に完了しました")
+        print("=" * 80)
+        
+    except Exception as e:
+        print()
+        print("=" * 80)
+        print(f"❌ エラーが発生しました: {e}")
+        print("=" * 80)
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        # ターミナルが閉じないように待機（エラー時も含む）
+        print()
+        print("Enterキーを押して終了してください...")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            # パイプやリダイレクト経由で実行されている場合は待機しない
+            pass
     
-    # 結果をJSONファイルに保存
-    if args.output is None:
-        output_file = f"seed_robustness_fixed_horizon_{args.horizon}M.json"
-    else:
-        output_file = args.output
-    
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-    print(f"結果を保存しました: {output_file}")
+    # ターミナルが閉じないように待機（エラー時も含む）
+    print()
+    print("=" * 80)
+    print("処理が完了しました。Enterキーを押して終了してください...")
+    print("=" * 80)
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        # パイプやリダイレクト経由で実行されている場合は待機しない
+        pass
 
