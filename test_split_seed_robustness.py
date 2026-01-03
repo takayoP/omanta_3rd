@@ -147,6 +147,7 @@ def test_seed_robustness(
     print("=" * 80)
     
     test_results = []  # 各seedでのテストデータの年率超過リターン（平均）
+    seed_details = []  # 各seedの詳細情報（test_dates、結果など）
     
     for seed in range(1, n_seeds + 1):
         print(f"\n[Seed {seed}/{n_seeds}]")
@@ -173,6 +174,19 @@ def test_seed_robustness(
         
         test_mean_excess_ann = test_perf["mean_annual_excess_return_pct"]
         test_results.append(test_mean_excess_ann)
+        
+        # seedごとの詳細情報を保存
+        seed_detail = {
+            "seed": seed,
+            "train_dates": train_dates,
+            "test_dates": test_dates,
+            "test_mean_annual_excess_return_pct": test_mean_excess_ann,
+            "test_median_annual_excess_return_pct": test_perf.get("median_annual_excess_return_pct", None),
+            "test_mean_annual_return_pct": test_perf.get("mean_annual_return_pct", None),
+            "test_win_rate": test_perf.get("win_rate", None),
+            "test_num_portfolios": test_perf.get("num_portfolios", None),
+        }
+        seed_details.append(seed_detail)
         
         print(f"  テストデータ年率超過リターン（平均）: {test_mean_excess_ann:.4f}%")
     
@@ -231,6 +245,32 @@ def test_seed_robustness(
         print("   → seedによって結果が大きく変動する可能性が高い")
     print()
     
+    # ワーストseedを特定
+    worst_seed_idx = np.argmin(test_results_array)
+    worst_seed_detail = seed_details[worst_seed_idx]
+    
+    # ベストseedを特定
+    best_seed_idx = np.argmax(test_results_array)
+    best_seed_detail = seed_details[best_seed_idx]
+    
+    print("【ワーストseedの詳細】")
+    print(f"  Seed: {worst_seed_detail['seed']}")
+    print(f"  テストデータ年率超過リターン（平均）: {worst_seed_detail['test_mean_annual_excess_return_pct']:.4f}%")
+    print(f"  テストデータ日数: {len(worst_seed_detail['test_dates'])}日")
+    print(f"  テストデータ: {worst_seed_detail['test_dates']}")
+    
+    # テストデータの年別分布を確認
+    from datetime import datetime as dt
+    test_years = {}
+    for date_str in worst_seed_detail['test_dates']:
+        year = dt.strptime(date_str, "%Y-%m-%d").year
+        test_years[year] = test_years.get(year, 0) + 1
+    
+    print(f"  テストデータの年別分布:")
+    for year in sorted(test_years.keys()):
+        print(f"    {year}年: {test_years[year]}日")
+    print()
+    
     # 結果を辞書にまとめる
     result = {
         "json_file": json_file,
@@ -251,6 +291,9 @@ def test_seed_robustness(
             "percentile_90": float(percentile_90),
             "positive_ratio": float(positive_ratio),
         },
+        "seed_details": seed_details,
+        "worst_seed": worst_seed_detail,
+        "best_seed": best_seed_detail,
     }
     
     return result

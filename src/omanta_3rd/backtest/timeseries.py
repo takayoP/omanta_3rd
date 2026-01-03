@@ -360,24 +360,22 @@ def calculate_timeseries_returns_from_portfolios(
                 })
                 continue
             
-            # リバランス日の翌営業日を取得（購入日）
-            purchase_date = _get_next_trading_day(conn, rebalance_date)
-            if purchase_date is None:
-                # 購入日が取得できない場合はスキップ（実データのみを返すため）
-                missing_periods_info.append({
-                    "rebalance_date": rebalance_date,
-                    "reason": "purchase_date_not_found",
-                })
-                continue
+            # 【売買タイミング: 実運用方式（証券会社制約）】
+            # 売却: リバランス日（月末）の始値で売却
+            # 購入: 次のリバランス日（月初）の始値で購入
+            # 注意: 実運用では証券会社の制約により、月末始値で売り、月初始値で買う形になっている
             
-            # 売却日は次のリバランス日（終値で売却）
-            sell_date = next_rebalance_date
+            # 売却日はリバランス日（月末始値で売却）
+            sell_date = rebalance_date
+            
+            # 購入日は次のリバランス日（月初始値で購入）
+            purchase_date = next_rebalance_date
             
             # 各銘柄のリターンを計算（バルク取得+ベクトル計算）
             # 必要な価格を一括取得
             codes = portfolio["code"].tolist()
+            sell_prices_df = _get_prices_bulk(conn, codes, [sell_date], use_open=True)
             purchase_prices_df = _get_prices_bulk(conn, codes, [purchase_date], use_open=True)
-            sell_prices_df = _get_prices_bulk(conn, codes, [sell_date], use_open=False)
             
             # DataFrameにマージ
             portfolio_with_prices = portfolio.copy()
@@ -457,16 +455,18 @@ def calculate_timeseries_returns_from_portfolios(
                 )
                 portfolio_return_net = portfolio_return_gross - cost_frac
                 
-                # TOPIXリターンを計算（バルク取得を使用）
-                topix_prices_df = _get_topix_prices_bulk(conn, [purchase_date, sell_date], use_open=False)
+                # TOPIXリターンを計算（実運用方式で統一）
+                # 売却: リバランス日（月末）の始値
+                # 購入: 次のリバランス日（月初）の始値
+                topix_sell_df = _get_topix_prices_bulk(conn, [sell_date], use_open=True)
                 topix_purchase_df = _get_topix_prices_bulk(conn, [purchase_date], use_open=True)
                 
                 topix_purchase = None
                 topix_sell = None
                 if not topix_purchase_df.empty and purchase_date in topix_purchase_df["date"].values:
                     topix_purchase = float(topix_purchase_df[topix_purchase_df["date"] == purchase_date]["price"].iloc[0])
-                if not topix_prices_df.empty and sell_date in topix_prices_df["date"].values:
-                    topix_sell = float(topix_prices_df[topix_prices_df["date"] == sell_date]["price"].iloc[0])
+                if not topix_sell_df.empty and sell_date in topix_sell_df["date"].values:
+                    topix_sell = float(topix_sell_df[topix_sell_df["date"] == sell_date]["price"].iloc[0])
                 
                 if topix_purchase is not None and topix_sell is not None and topix_purchase > 0:
                     topix_return = (topix_sell / topix_purchase - 1.0)
@@ -554,12 +554,13 @@ def calculate_timeseries_returns(
     
     各リバランス日 ti から次のリバランス日 ti+1 までの月次リターンを計算します。
     
-    【売買タイミング: open-close方式】
+    【売買タイミング: 実運用方式（証券会社制約）】
     - 意思決定: リバランス日 t の引けでシグナル確定（tまでの情報で計算）
-    - 購入執行: 翌営業日 t+1 の寄り成（open）で購入
-    - 売却執行: 次のリバランス日 t_next の引け成（close）で売却
-    - リターン: open(t+1) → close(t_next) の期間
-    - TOPIXも同じタイミングで統一（購入: open、売却: close）
+    - 売却執行: リバランス日 t（月末）の始値（open）で売却
+    - 購入執行: 次のリバランス日 t_next（月初）の始値（open）で購入
+    - リターン: open(t) → open(t_next) の期間
+    - TOPIXも同じタイミングで統一（売却: 月末始値、購入: 月初始値）
+    - 注意: 実運用では証券会社の制約により、月末始値で売り、月初始値で買う形になっている
     
     【欠損銘柄のウェイト設計: drop_and_renormalize】
     - 価格データが欠損した銘柄は除外
@@ -634,27 +635,23 @@ def calculate_timeseries_returns(
                 equity_curve.append(equity_curve[-1])
                 continue
             
-            # 【売買タイミング: open-close方式】
+            # 【売買タイミング: 実運用方式（証券会社制約）】
             # 意思決定: リバランス日 t の引けでシグナル確定（tまでの情報で計算）
-            # 購入執行: 翌営業日 t+1 の寄り成（open）で購入
-            # 売却執行: 次のリバランス日 t_next の引け成（close）で売却
-            # リターン: open(t+1) → close(t_next) の期間
+            # 売却執行: リバランス日 t（月末）の始値（open）で売却
+            # 購入執行: 次のリバランス日 t_next（月初）の始値（open）で購入
+            # リターン: open(t) → open(t_next) の期間
+            # 注意: 実運用では証券会社の制約により、月末始値で売り、月初始値で買う形になっている
             
-            # リバランス日の翌営業日を取得（購入日）
-            purchase_date = _get_next_trading_day(conn, rebalance_date)
-            if purchase_date is None:
-                monthly_returns.append(0.0)
-                monthly_excess_returns.append(0.0)
-                equity_curve.append(equity_curve[-1])
-                continue
+            # 売却日はリバランス日（月末始値で売却）
+            sell_date = rebalance_date
             
-            # 売却日は次のリバランス日（終値で売却）
-            sell_date = next_rebalance_date
+            # 購入日は次のリバランス日（月初始値で購入）
+            purchase_date = next_rebalance_date
             
             # 各銘柄のリターンを計算（バルク取得+ベクトル計算）
             codes = portfolio["code"].tolist()
+            sell_prices_df = _get_prices_bulk(conn, codes, [sell_date], use_open=True)
             purchase_prices_df = _get_prices_bulk(conn, codes, [purchase_date], use_open=True)
-            sell_prices_df = _get_prices_bulk(conn, codes, [sell_date], use_open=False)
             
             # DataFrameにマージ
             portfolio_with_prices = portfolio.copy()
@@ -737,19 +734,19 @@ def calculate_timeseries_returns(
                 )
                 portfolio_return_net = portfolio_return_gross - cost_frac
                 
-                # TOPIXリターンを計算（open-close方式で統一）
-                # 購入: リバランス日の翌営業日の始値
-                # 売却: 次のリバランス日の終値
+                # TOPIXリターンを計算（実運用方式で統一）
+                # 売却: リバランス日（月末）の始値
+                # 購入: 次のリバランス日（月初）の始値
                 # バルク取得を使用（将来的には全期間を一括取得できるが、現状は1回ずつ）
-                topix_prices_df = _get_topix_prices_bulk(conn, [purchase_date, sell_date], use_open=False)
+                topix_sell_df = _get_topix_prices_bulk(conn, [sell_date], use_open=True)
                 topix_purchase_df = _get_topix_prices_bulk(conn, [purchase_date], use_open=True)
                 
                 topix_purchase = None
                 topix_sell = None
                 if not topix_purchase_df.empty and purchase_date in topix_purchase_df["date"].values:
                     topix_purchase = float(topix_purchase_df[topix_purchase_df["date"] == purchase_date]["price"].iloc[0])
-                if not topix_prices_df.empty and sell_date in topix_prices_df["date"].values:
-                    topix_sell = float(topix_prices_df[topix_prices_df["date"] == sell_date]["price"].iloc[0])
+                if not topix_sell_df.empty and sell_date in topix_sell_df["date"].values:
+                    topix_sell = float(topix_sell_df[topix_sell_df["date"] == sell_date]["price"].iloc[0])
                 
                 if topix_purchase is not None and topix_sell is not None and topix_purchase > 0:
                     topix_return = (topix_sell / topix_purchase - 1.0)
@@ -764,8 +761,8 @@ def calculate_timeseries_returns(
                 
                 portfolio_details.append({
                     "rebalance_date": rebalance_date,
-                    "purchase_date": purchase_date,  # リバランス日の翌営業日
-                    "sell_date": sell_date,  # 次のリバランス日
+                    "sell_date": sell_date,  # リバランス日（月末始値で売却）
+                    "purchase_date": purchase_date,  # 次のリバランス日（月初始値で購入）
                     "next_rebalance_date": next_rebalance_date,
                     "num_stocks": len(stock_returns),
                     "num_missing_stocks": len(missing_codes),  # 欠損銘柄数
