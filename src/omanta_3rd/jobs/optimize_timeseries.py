@@ -272,12 +272,18 @@ def _run_single_backtest_portfolio_only(
         ポートフォリオDataFrame（エラー時はNone）
     """
     try:
+        import sys
+        print(f"        [_run_single_backtest] 開始: {rebalance_date}")
+        sys.stdout.flush()
+        
         # 辞書からdataclassに復元
         strategy_params = StrategyParams(**strategy_params_dict)
         entry_params = EntryScoreParams(**entry_params_dict)
         
         # 特徴量を取得（キャッシュ優先）
         if feat is None:
+            print(f"        [_run_single_backtest] DBから特徴量を取得: {rebalance_date}")
+            sys.stdout.flush()
             # DBから取得
             try:
                 with connect_db(read_only=True) as conn:
@@ -290,10 +296,17 @@ def _run_single_backtest_portfolio_only(
                     raise
         
         if feat is None or feat.empty:
+            print(f"        [_run_single_backtest] ⚠️  特徴量が空: {rebalance_date}")
+            sys.stdout.flush()
             return None
+        
+        print(f"        [_run_single_backtest] 特徴量取得完了: {rebalance_date} (銘柄数: {len(feat)})")
+        sys.stdout.flush()
         
         # entry_scoreを計算（パラメータ化版、価格データはキャッシュから取得）
         if prices_data is not None:
+            print(f"        [_run_single_backtest] entry_score計算開始 (キャッシュ使用): {rebalance_date}")
+            sys.stdout.flush()
             # キャッシュから価格データを取得
             close_map = {
                 code: pd.Series(prices)
@@ -321,13 +334,19 @@ def _run_single_backtest_portfolio_only(
             feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
         
         # ポートフォリオを選択（パラメータ化版）
+        print(f"        [_run_single_backtest] ポートフォリオ選択開始: {rebalance_date}")
+        sys.stdout.flush()
         portfolio = _select_portfolio_with_params(
             feat, strategy_params, entry_params
         )
         
         if portfolio is None or portfolio.empty:
+            print(f"        [_run_single_backtest] ⚠️  ポートフォリオが空: {rebalance_date}")
+            sys.stdout.flush()
             return None
         
+        print(f"        [_run_single_backtest] ✓ 完了: {rebalance_date} (選択銘柄数: {len(portfolio)})")
+        sys.stdout.flush()
         return portfolio
     except Exception as e:
         print(f"エラー ({rebalance_date}): {e}")
@@ -410,11 +429,65 @@ def objective_timeseries(
         liquidity_quantile_cut=liquidity_quantile_cut,
     )
     
-    # EntryScoreParamsのパラメータ（既存版と同じ範囲）
-    rsi_base = trial.suggest_float("rsi_base", 35.0, 60.0)
-    rsi_max = trial.suggest_float("rsi_max", max(70.0, rsi_base + 5.0), 85.0)
-    bb_z_base = trial.suggest_float("bb_z_base", -2.0, 0.0)
-    bb_z_max = trial.suggest_float("bb_z_max", max(2.0, bb_z_base + 0.5), 3.5)
+    # EntryScoreParamsのパラメータ（順張り/逆張りを対称に探索）
+    RSI_LOW, RSI_HIGH = 15.0, 85.0
+    rsi_min_width = 20.0  # 最小幅制約（固定値、探索してもOK）
+    
+    # 最初にOptunaでサンプリング
+    rsi_base = trial.suggest_float("rsi_base", RSI_LOW, RSI_HIGH)
+    rsi_max = trial.suggest_float("rsi_max", RSI_LOW, RSI_HIGH)
+    
+    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
+    max_retries = 100  # 最大再試行回数（無限ループ防止）
+    retry_count = 0
+    
+    # trialのシードに基づいた再現可能な乱数生成器を作成
+    # trial.numberとtrial._trial_idを使ってシードを生成
+    trial_seed = hash((trial.number, getattr(trial, '_trial_id', trial.number))) % (2**31)
+    rng = np.random.RandomState(trial_seed)
+    
+    while abs(rsi_max - rsi_base) < rsi_min_width and retry_count < max_retries:
+        rsi_base = rng.uniform(RSI_LOW, RSI_HIGH)
+        rsi_max = rng.uniform(RSI_LOW, RSI_HIGH)
+        retry_count += 1
+    
+    if retry_count > 0:
+        # 再サンプリングした場合は記録
+        trial.set_user_attr("rsi_resampled", True)
+        trial.set_user_attr("rsi_retry_count", retry_count)
+    
+    # 最終的なパラメータを記録
+    trial.set_user_attr("rsi_base_final", rsi_base)
+    trial.set_user_attr("rsi_max_final", rsi_max)
+    
+    # BB Z-scoreパラメータ（順張り/逆張りを対称に探索）
+    BB_LOW, BB_HIGH = -3.5, 3.5
+    bb_z_min_width = 1.0  # 最小幅制約
+    
+    # 最初にOptunaでサンプリング
+    bb_z_base = trial.suggest_float("bb_z_base", BB_LOW, BB_HIGH)
+    bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, BB_HIGH)
+    
+    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
+    # RSIとは別のシード系列を使用（オフセットを追加）
+    bb_trial_seed = (trial_seed + 10000) % (2**31)
+    bb_rng = np.random.RandomState(bb_trial_seed)
+    
+    retry_count = 0
+    while abs(bb_z_max - bb_z_base) < bb_z_min_width and retry_count < max_retries:
+        bb_z_base = bb_rng.uniform(BB_LOW, BB_HIGH)
+        bb_z_max = bb_rng.uniform(BB_LOW, BB_HIGH)
+        retry_count += 1
+    
+    if retry_count > 0:
+        # 再サンプリングした場合は記録
+        trial.set_user_attr("bb_resampled", True)
+        trial.set_user_attr("bb_retry_count", retry_count)
+    
+    # 最終的なパラメータを記録
+    trial.set_user_attr("bb_z_base_final", bb_z_base)
+    trial.set_user_attr("bb_z_max_final", bb_z_max)
+    
     bb_weight = trial.suggest_float("bb_weight", 0.45, 0.75)
     rsi_weight = 1.0 - bb_weight
     
@@ -425,7 +498,17 @@ def objective_timeseries(
         bb_z_max=bb_z_max,
         bb_weight=bb_weight,
         rsi_weight=rsi_weight,
+        rsi_min_width=rsi_min_width,
+        bb_z_min_width=bb_z_min_width,
     )
+    
+    # 順張り/逆張りの方向と幅をログに記録
+    rsi_direction = "順張り" if rsi_max > rsi_base else "逆張り"
+    bb_direction = "順張り" if bb_z_max > bb_z_base else "逆張り"
+    trial.set_user_attr("rsi_direction", rsi_direction)
+    trial.set_user_attr("bb_direction", bb_direction)
+    trial.set_user_attr("rsi_width", abs(rsi_max - rsi_base))
+    trial.set_user_attr("bb_z_width", abs(bb_z_max - bb_z_base))
     
     # バックテスト実行（時系列版）
     perf = run_backtest_for_optimization_timeseries(

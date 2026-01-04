@@ -53,3 +53,5 @@ python -m omanta_3rd.jobs.optimize_longterm \
 - **並列化**: `--n-jobs 1`で実行（DB書き込み競合を避けるため）
 - **キャッシュ**: 既存のキャッシュが使用されます（`cache/features/features_2020-01-31_2022-12-30_v1.parquet`）
 
+
+

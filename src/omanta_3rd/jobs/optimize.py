@@ -43,13 +43,16 @@ from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
 
 @dataclass
 class EntryScoreParams:
-    """entry_score計算のパラメータ（順張り向け）"""
-    rsi_base: float = 50.0  # RSI基準値（順張り: 50以上で高スコア）
-    rsi_max: float = 80.0  # RSI上限（順張り: 80で最大スコア）
-    bb_z_base: float = 0.0  # BB Z-score基準値（順張り: 0以上で高スコア）
-    bb_z_max: float = 3.0  # BB Z-score上限（順張り: 3で最大スコア）
+    """entry_score計算のパラメータ（順張り/逆張り両対応）"""
+    rsi_base: float = 50.0  # RSI基準値（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
+    rsi_max: float = 80.0  # RSI上限（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
+    bb_z_base: float = 0.0  # BB Z-score基準値（bb_z_max > bb_z_base: 順張り、bb_z_max < bb_z_base: 逆張り）
+    bb_z_max: float = 3.0  # BB Z-score上限（bb_z_max > bb_z_base: 順張り、bb_z_max < bb_z_base: 逆張り）
     bb_weight: float = 0.5  # BBとRSIの重み（BB側）
     rsi_weight: float = 0.5  # BBとRSIの重み（RSI側）
+    # 最小幅制約（分母が0に近くなるのを防ぐ）
+    rsi_min_width: float = 20.0  # RSIの最小幅（abs(rsi_max - rsi_base) >= rsi_min_width）
+    bb_z_min_width: float = 1.0  # BB Z-scoreの最小幅（abs(bb_z_max - bb_z_base) >= bb_z_min_width）
 
 
 def _entry_score_with_params(
@@ -77,22 +80,36 @@ def _entry_score_with_params(
         rsi_score = np.nan
 
         if not pd.isna(z):
-            # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
-            if params.bb_z_max != params.bb_z_base:
-                bb_score = (z - params.bb_z_base) / (params.bb_z_max - params.bb_z_base)
+            # 最小幅チェック（分母が0に近くなるのを防ぐ）
+            bb_z_diff = params.bb_z_max - params.bb_z_base
+            if abs(bb_z_diff) >= params.bb_z_min_width:
+                # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
+                # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
+                raw_score = (z - params.bb_z_base) / bb_z_diff
+                # sigmoid化で張り付きを防ぐ（k=3で滑らかに）
+                # tanh版: score = 0.5 + 0.5 * np.tanh(3 * (raw_score - 0.5))
+                # より滑らかなsigmoid版を使用
+                k = 3.0  # スケーリング係数（大きいほど急峻）
+                sigmoid_score = 1.0 / (1.0 + np.exp(-k * (raw_score - 0.5)))
+                bb_score = sigmoid_score
             else:
-                bb_score = 0.0
-            # クリップ処理（0〜1に制限）
-            bb_score = np.clip(bb_score, 0.0, 1.0)
+                # 最小幅未満の場合はNaN（無効）
+                bb_score = np.nan
                 
         if not pd.isna(rsi):
-            # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
-            if params.rsi_max != params.rsi_base:
-                rsi_score = (rsi - params.rsi_base) / (params.rsi_max - params.rsi_base)
+            # 最小幅チェック（分母が0に近くなるのを防ぐ）
+            rsi_diff = params.rsi_max - params.rsi_base
+            if abs(rsi_diff) >= params.rsi_min_width:
+                # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
+                # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
+                raw_score = (rsi - params.rsi_base) / rsi_diff
+                # sigmoid化で張り付きを防ぐ
+                k = 3.0  # スケーリング係数
+                sigmoid_score = 1.0 / (1.0 + np.exp(-k * (raw_score - 0.5)))
+                rsi_score = sigmoid_score
             else:
-                rsi_score = 0.0
-            # クリップ処理（0〜1に制限）
-            rsi_score = np.clip(rsi_score, 0.0, 1.0)
+                # 最小幅未満の場合はNaN（無効）
+                rsi_score = np.nan
 
         # 重み付き合計
         total_weight = params.bb_weight + params.rsi_weight
@@ -162,26 +179,32 @@ def _select_portfolio_with_params(
     )
     
     # entry_scoreを計算（パラメータ化版）
-    # 価格データを取得（build_features内で既に取得されているはずだが、再取得が必要な場合）
-    # ここでは、build_featuresの結果にentry_scoreを追加する必要がある
-    # 実際には、build_features内でentry_scoreを計算しているので、
-    # パラメータ化版のentry_scoreを計算する必要がある
-    
-    # 価格データを取得
-    price_date = feat["as_of_date"].iloc[0]
-    with connect_db() as conn:
-        prices_win = pd.read_sql_query(
-            """
-            SELECT code, date, adj_close
-            FROM prices_daily
-            WHERE date <= ?
-            ORDER BY code, date
-            """,
-            conn,
-            params=(price_date,),
-        )
-    
-    feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
+    # 注意: _run_single_backtest_portfolio_only内で既にentry_scoreが計算されている場合はスキップ
+    if "entry_score" not in feat.columns or feat["entry_score"].isna().all():
+        # entry_scoreが存在しない、または全てNaNの場合は計算
+        print(f"        [_select_portfolio] entry_score再計算が必要（DBから価格データ取得）")
+        import sys
+        sys.stdout.flush()
+        
+        # 価格データを取得
+        price_date = feat["as_of_date"].iloc[0]
+        with connect_db() as conn:
+            prices_win = pd.read_sql_query(
+                """
+                SELECT code, date, adj_close
+                FROM prices_daily
+                WHERE date <= ?
+                ORDER BY code, date
+                """,
+                conn,
+                params=(price_date,),
+            )
+        
+        feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
+    else:
+        print(f"        [_select_portfolio] entry_scoreは既に計算済み（スキップ）")
+        import sys
+        sys.stdout.flush()
     
     # フィルタリング
     df = feat.copy()

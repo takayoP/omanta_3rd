@@ -10,3 +10,5 @@ print(f"2020-10-01は{weekday_names[d.weekday()]}です（weekday={d.weekday()}�
 d2 = datetime(2020, 10, 3)
 print(f"2020-10-03は{weekday_names[d2.weekday()]}です（weekday={d2.weekday()}）")
 
+
+

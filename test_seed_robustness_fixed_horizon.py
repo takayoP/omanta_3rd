@@ -146,6 +146,8 @@ def build_params_from_json(params_dict: Dict[str, float]) -> tuple[StrategyParam
     )
     
     # EntryScoreParamsを構築
+    # rsi_min_widthとbb_z_min_widthは固定値（最適化時と同じ値を使用）
+    # JSONに含まれていない場合はデフォルト値を使用
     entry_params = EntryScoreParams(
         rsi_base=params_dict["rsi_base"],
         rsi_max=params_dict["rsi_max"],
@@ -153,6 +155,8 @@ def build_params_from_json(params_dict: Dict[str, float]) -> tuple[StrategyParam
         bb_z_max=params_dict["bb_z_max"],
         bb_weight=params_dict["bb_weight"],
         rsi_weight=1.0 - params_dict["bb_weight"],
+        rsi_min_width=params_dict.get("rsi_min_width", 20.0),  # デフォルト: 20.0
+        bb_z_min_width=params_dict.get("bb_z_min_width", 1.0),  # デフォルト: 1.0
     )
     
     return strategy_params, entry_params

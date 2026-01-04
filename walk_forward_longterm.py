@@ -14,6 +14,12 @@ Usage:
         --n-trials 50
 """
 
+# BLASスレッドの制御（並列化時のオーバーサブスクライブを防ぐ）
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import argparse
 import json
 import numpy as np
@@ -184,6 +190,8 @@ def split_dates_into_folds(
             fold_num = 1
             
             # 各中間年でSplitを作成（評価終了年ベース）
+            train_min_months = int(train_min_years * 12)
+            
             for test_eval_year in eval_years:
                 # Train: 評価終了年 < test_eval_year
                 train_dates = []
@@ -195,6 +203,12 @@ def split_dates_into_folds(
                 test_dates = sorted(dates_by_eval_year[test_eval_year])
                 
                 train_dates = sorted(train_dates)
+                
+                # train_min_yearsを満たさないfoldは除外（ChatGPTの指摘に対応）
+                if len(train_dates) < train_min_months:
+                    print(f"  ⚠️  Fold {fold_num}（Test=評価終了年{test_eval_year}）を除外: "
+                          f"Train期間が{len(train_dates)}ヶ月（最小要件: {train_min_months}ヶ月）")
+                    continue
                 
                 if len(train_dates) > 0 and len(test_dates) > 0:
                     folds.append({
@@ -216,24 +230,29 @@ def split_dates_into_folds(
             
             train_dates = sorted(train_dates)
             
-            # Disjointチェック（最後のfold）
-            train_set = set(train_dates)
-            test_set = set(holdout_test_dates)
-            if train_set & test_set:
-                raise ValueError(f"❌ TrainとTestが重複しています: {train_set & test_set}")
-            
-            if len(train_dates) > 0 and len(holdout_test_dates) > 0:
-                folds.append({
-                    "fold": fold_num,
-                    "train_dates": train_dates,
-                    "test_dates": holdout_test_dates,
-                    "train_start": train_dates[0],
-                    "train_end": train_dates[-1],
-                    "test_start": holdout_test_dates[0],
-                    "test_end": holdout_test_dates[-1],
-                    "is_holdout": True,
-                    "holdout_eval_year": holdout_eval_year,
-                })
+            # train_min_yearsを満たさないfoldは除外（ChatGPTの指摘に対応）
+            if len(train_dates) < train_min_months:
+                print(f"  ⚠️  最終ホールドアウトfoldを除外: "
+                      f"Train期間が{len(train_dates)}ヶ月（最小要件: {train_min_months}ヶ月）")
+            else:
+                # Disjointチェック（最後のfold）
+                train_set = set(train_dates)
+                test_set = set(holdout_test_dates)
+                if train_set & test_set:
+                    raise ValueError(f"❌ TrainとTestが重複しています: {train_set & test_set}")
+                
+                if len(train_dates) > 0 and len(holdout_test_dates) > 0:
+                    folds.append({
+                        "fold": fold_num,
+                        "train_dates": train_dates,
+                        "test_dates": holdout_test_dates,
+                        "train_start": train_dates[0],
+                        "train_end": train_dates[-1],
+                        "test_start": holdout_test_dates[0],
+                        "test_end": holdout_test_dates[-1],
+                        "is_holdout": True,
+                        "holdout_eval_year": holdout_eval_year,
+                    })
             
             # 全foldでDisjointチェック
             for fold_info in folds:
@@ -436,6 +455,8 @@ def run_optimization_for_fold(
     study_type: str = "C",
     seed: Optional[int] = None,
     cache_dir: str = "cache/features",
+    fold_num: Optional[int] = None,
+    n_jobs_optuna: int = 1,  # Optunaの並列化数（-1: 自動, 1: 逐次実行）
 ) -> Dict[str, Any]:
     """
     foldのtrain期間で最適化を実行（長期保有型）
@@ -461,8 +482,35 @@ def run_optimization_for_fold(
     from omanta_3rd.backtest.feature_cache import FeatureCache
     
     # Optunaスタディを作成（毎回新しいstudy_nameを生成）
-    study_name = f"wfa_longterm_fold_{dt.now().strftime('%Y%m%d_%H%M%S')}"
-    print(f"  Study名: {study_name} (新規作成)")
+    # 並列実行時の競合を避けるため、fold番号とプロセスIDを含める
+    import os
+    import multiprocessing as mp
+    
+    # Optunaの並列化を有効にする（n_jobs_optuna > 1の場合）
+    # 注意: SQLiteは並列書き込みに弱いため、並列化する場合はメモリストレージを使用
+    if n_jobs_optuna == -1:
+        # メモリ使用量を考慮して、並列数を制限（推奨: 2並列）
+        # 各trialが大量のメモリを使用するため、並列数を制限
+        n_jobs_optuna = max(1, min(n_trials, 2))  # 最大2並列（メモリ使用量を考慮）
+    elif n_jobs_optuna <= 0:
+        n_jobs_optuna = 1
+    
+    # Optunaの並列化を使用する場合は、SQLiteではなくメモリストレージを使用
+    use_memory_storage = (n_jobs_optuna > 1)
+    
+    if use_memory_storage:
+        study_name = None  # メモリストレージの場合はNone
+        storage = None
+        print(f"  ⚠️  注意: Optuna並列化のため、メモリストレージを使用します")
+    else:
+        process_id = os.getpid()
+        timestamp = dt.now().strftime('%Y%m%d_%H%M%S_%f')  # マイクロ秒まで含める
+        if fold_num is not None:
+            study_name = f"wfa_longterm_fold{fold_num}_{timestamp}_pid{process_id}"
+        else:
+            study_name = f"wfa_longterm_{timestamp}_pid{process_id}"
+        storage = f"sqlite:///optuna_{study_name}.db"
+        print(f"  Study名: {study_name} (新規作成)")
     
     try:
         # Optunaスタディを作成（samplerをcreate_study時に指定）
@@ -476,34 +524,77 @@ def run_optimization_for_fold(
         study = optuna.create_study(
             direction="maximize",
             study_name=study_name,
-            storage=f"sqlite:///optuna_{study_name}.db",
+            storage=storage,
             load_if_exists=False,  # 既存studyを読み込まない（新規作成）
             sampler=sampler,
         )
-        print(f"  ✓ Optunaスタディを作成しました (load_if_exists=False)")
+        if use_memory_storage:
+            print(f"  ✓ Optunaスタディを作成しました (メモリストレージ)")
+        else:
+            print(f"  ✓ Optunaスタディを作成しました (load_if_exists=False)")
         
         # 特徴量キャッシュを構築
+        # 注意: 親プロセスで既にwarm済みの場合は、ここでは再読み込みのみ
+        # ただし、子プロセスではpickleの問題があるため、キャッシュから再読み込みが必要
         feature_cache = FeatureCache(cache_dir=cache_dir)
+        # train_datesのみをwarm（既にキャッシュがある場合は読み込みのみ）
         features_dict, prices_dict = feature_cache.warm(
             train_dates,
-            n_jobs=-1
+            n_jobs=1  # fold間並列化が有効な場合は1に設定（プロセス数の爆発を防ぐ）
         )
         
-        # 最適化実行
-        print(f"  最適化を開始します (n_trials={n_trials})...")
+        # 最適化実行（timed_objectiveで進捗を可視化）
+        import time
+        
+        def timed_objective(trial):
+            """trialごとの実行時間を計測するラッパー"""
+            print(f"  [Trial {trial.number}] ⚡ timed_objective呼び出し開始")
+            import sys
+            sys.stdout.flush()  # バッファをフラッシュ
+            t0 = time.perf_counter()
+            try:
+                print(f"  [Trial {trial.number}] → objective_longterm呼び出し...")
+                sys.stdout.flush()
+                v = objective_longterm(
+                    trial,
+                    train_dates,
+                    study_type,
+                    cost_bps=0.0,
+                    n_jobs=1,  # 各trial内では逐次実行（Optunaの並列化と競合を避ける）
+                    features_dict=features_dict,
+                    prices_dict=prices_dict,
+                )
+                dt = time.perf_counter() - t0
+                print(f"  [Trial {trial.number}] ✅ 完了: value={v:.6f}, 時間={dt:.1f}秒 ({dt/60:.1f}分)")
+                sys.stdout.flush()
+                return v
+            except Exception as e:
+                dt = time.perf_counter() - t0
+                print(f"  [Trial {trial.number}] ❌ エラー: {e}, 時間={dt:.1f}秒")
+                import traceback
+                traceback.print_exc()
+                sys.stdout.flush()
+                raise
+        
+        if n_jobs_optuna > 1:
+            print(f"  最適化を開始します (n_trials={n_trials}, Optuna並列数={n_jobs_optuna})...")
+        else:
+            print(f"  最適化を開始します (n_trials={n_trials}, 逐次実行)...")
+        
+        import sys
+        sys.stdout.flush()
+        print(f"  ⚡ study.optimize呼び出し直前...")
+        sys.stdout.flush()
+        
         study.optimize(
-            lambda trial: objective_longterm(
-                trial,
-                train_dates,
-                study_type,
-                cost_bps=0.0,
-                n_jobs=1,  # WFAでは逐次実行
-                features_dict=features_dict,
-                prices_dict=prices_dict,
-            ),
+            timed_objective,
             n_trials=n_trials,
-            show_progress_bar=False,
+            n_jobs=n_jobs_optuna,  # Optunaの並列化を有効化
+            show_progress_bar=True,  # 進捗バーを表示
         )
+        
+        print(f"  ✅ study.optimize完了")
+        sys.stdout.flush()
         
         # 最良パラメータを取得
         best_params_raw = study.best_params.copy()
@@ -597,6 +688,114 @@ def run_backtest_with_fixed_params_longterm(
     return perf
 
 
+def _process_single_fold_wrapper(
+    fold_info: Dict[str, Any],
+    horizon_months: int,
+    n_trials: int,
+    study_type: str,
+    seed: Optional[int],
+    cache_dir: str,
+    rebalance_dates: List[str],  # 全リバランス日（キャッシュ再読み込み用）
+    n_jobs_optuna: int,  # Optunaの並列化数
+) -> Dict[str, Any]:
+    """単一foldの処理をラップ（並列化用、グローバル関数として定義）"""
+    try:
+        # 注意: run_optimization_for_foldとrun_backtest_with_fixed_params_longtermは
+        # walk_forward_longterm.py内で定義されているため、importlibでモジュールを再読み込み
+        import importlib.util
+        import sys
+        import os
+        
+        # 現在のスクリプトのパスを取得
+        script_path = os.path.abspath(__file__)
+        module_name = 'walk_forward_longterm'
+        
+        # モジュールを読み込む
+        spec = importlib.util.spec_from_file_location(module_name, script_path)
+        wf_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wf_module)
+        
+        run_optimization_for_fold = wf_module.run_optimization_for_fold
+        run_backtest_with_fixed_params_longterm = wf_module.run_backtest_with_fixed_params_longterm
+        
+        from omanta_3rd.backtest.feature_cache import FeatureCache
+        
+        fold_num = fold_info["fold"]
+        train_dates = fold_info["train_dates"]
+        test_dates = fold_info["test_dates"]
+        
+        # 各プロセス内でキャッシュからデータを再読み込み（pickle問題を回避）
+        print(f"  [Fold {fold_num}] キャッシュからデータを読み込みます...")
+        feature_cache = FeatureCache(cache_dir=cache_dir)
+        features_dict, prices_dict = feature_cache.warm(
+            rebalance_dates,
+            n_jobs=1  # 並列化は既にfold間で行われているため、ここでは1
+        )
+        print(f"  [Fold {fold_num}] データ読み込み完了: 特徴量{len(features_dict)}日分、価格データ{len(prices_dict)}日分")
+        
+        # Train期間で最適化
+        opt_result = run_optimization_for_fold(
+            train_dates,
+            n_trials=n_trials,
+            study_type=study_type,
+            seed=seed,
+            cache_dir=cache_dir,
+            fold_num=fold_num,  # fold番号を渡してstudy_nameに含める
+            n_jobs_optuna=n_jobs_optuna,  # Optunaの並列化数
+        )
+        
+        if opt_result is None:
+            return {"fold": fold_num, "error": "最適化に失敗しました"}
+        
+        best_params = opt_result["best_params"]
+        best_value = opt_result["best_value"]
+        
+        # Test期間でバックテスト（固定ホライズン）
+        test_perf = run_backtest_with_fixed_params_longterm(
+            test_dates,
+            best_params,
+            horizon_months=horizon_months,
+            features_dict=features_dict,
+            prices_dict=prices_dict,
+        )
+        
+        fold_result = {
+            "fold": fold_num,
+            "train_start": fold_info["train_start"],
+            "train_end": fold_info["train_end"],
+            "test_start": fold_info["test_start"],
+            "test_end": fold_info["test_end"],
+            "train_dates_count": len(train_dates),
+            "test_dates_count": len(test_dates),
+            "is_holdout": fold_info.get("is_holdout", False),
+            "optimization": {
+                "best_value": float(best_value) if best_value is not None else None,
+                "best_params": best_params,
+                "n_trials": n_trials,
+                "best_trial_number": opt_result.get("best_trial_number"),
+                "study_name": opt_result.get("study_name"),
+            },
+            "test_performance": test_perf,
+        }
+        
+        if "validate_dates" in fold_info and len(fold_info.get("validate_dates", [])) > 0:
+            validate_dates = fold_info["validate_dates"]
+            fold_result["validate_start"] = fold_info.get("validate_start")
+            fold_result["validate_end"] = fold_info.get("validate_end")
+            fold_result["validate_dates_count"] = len(validate_dates)
+        
+        # holdout_eval_yearをfold_resultに含める（並列化時の表示用）
+        if "holdout_eval_year" in fold_info:
+            fold_result["holdout_eval_year"] = fold_info["holdout_eval_year"]
+        
+        return fold_result
+    except Exception as e:
+        import traceback
+        print(f"  ❌ Fold {fold_info.get('fold', '?')}の処理中にエラー: {e}")
+        traceback.print_exc()
+        return {"fold": fold_info.get("fold", 0), "error": str(e)}
+
+
 def run_walk_forward_analysis_longterm(
     start_date: str,
     end_date: str,
@@ -611,6 +810,7 @@ def run_walk_forward_analysis_longterm(
     fold_type: str = "roll",
     holdout_eval_year: Optional[int] = None,
     n_jobs_fold: int = 1,
+    n_jobs_optuna: int = -1,  # Optunaの並列化数（-1: 自動, 1: 逐次実行）
 ) -> Dict[str, Any]:
     """
     長期保有型のWalk-Forward Analysisを実行
@@ -683,10 +883,21 @@ def run_walk_forward_analysis_longterm(
         horizon_months=horizon_months,
     )
     print(f"✓ {len(folds)}個のfoldを作成")
+    
+    # fold数の確認（roll方式の場合、最低3fold以上が推奨）
+    if fold_type == "roll" and len(folds) < 3:
+        print(f"⚠️  警告: roll方式でfold数が{len(folds)}個と少ないです（最低3fold以上が推奨）")
+        print(f"  対処: --start を早めるか、データ範囲を拡大してください")
+        print()
+    
     for fold_info in folds:
         if fold_info.get("is_holdout", False):
-            holdout_year = int(fold_info["test_start"].split("-")[0])
-            print(f"  Fold {fold_info['fold']}: 最終ホールドアウト（{holdout_year}年）")
+            if "holdout_eval_year" in fold_info:
+                eval_year = fold_info["holdout_eval_year"]
+                print(f"  Fold {fold_info['fold']}: 最終ホールドアウト（評価終了年: {eval_year}年）")
+            else:
+                holdout_year = int(fold_info["test_start"].split("-")[0])
+                print(f"  Fold {fold_info['fold']}: 最終ホールドアウト（{holdout_year}年）")
         else:
             print(f"  Fold {fold_info['fold']}: Train {fold_info['train_start']} ～ {fold_info['train_end']}, Test {fold_info['test_start']} ～ {fold_info['test_end']}")
     print()
@@ -709,16 +920,30 @@ def run_walk_forward_analysis_longterm(
     # 並列化の設定
     import multiprocessing as mp
     if n_jobs_fold == -1:
-        n_jobs_fold = min(len(folds), mp.cpu_count())
+        n_jobs_fold = min(len(folds), max(1, mp.cpu_count() // 2))  # CPUコア数の半分を上限
     elif n_jobs_fold <= 0:
         n_jobs_fold = 1
     else:
         n_jobs_fold = min(n_jobs_fold, len(folds), mp.cpu_count())
     
-    if n_jobs_fold > 1:
+    # 並列戦略: fold並列とOptuna並列を同時に使わない（オーバーサブスクライブを防ぐ）
+    use_fold_parallel = (n_jobs_fold > 1 and len(folds) > 1)
+    if use_fold_parallel:
+        # fold並列を使用する場合、Optuna並列は無効化
+        if n_jobs_optuna > 1:
+            print(f"⚠️  注意: fold並列が有効なため、Optuna並列を無効化します（n_jobs_optuna: {n_jobs_optuna} → 1）")
+            n_jobs_optuna = 1
         print(f"並列実行: {n_jobs_fold}プロセス（fold間並列化）")
     else:
-        print("逐次実行（fold間）")
+        # fold並列が無効な場合、Optuna並列を有効化
+        if n_jobs_optuna == -1:
+            n_jobs_optuna = max(1, min(n_trials, 2))  # 最大2並列（メモリ使用量を考慮）
+        elif n_jobs_optuna <= 0:
+            n_jobs_optuna = 1
+        if n_jobs_optuna > 1:
+            print(f"並列実行: Optuna並列化（n_jobs={n_jobs_optuna}）")
+        else:
+            print("逐次実行（fold間、Optuna）")
     print()
     
     fold_results = []
@@ -726,83 +951,6 @@ def run_walk_forward_analysis_longterm(
     # fold間の並列化
     if n_jobs_fold > 1 and len(folds) > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
-        from dataclasses import fields
-        
-        def _process_single_fold_wrapper(
-            fold_info: Dict[str, Any],
-            horizon_months: int,
-            n_trials: int,
-            study_type: str,
-            seed: Optional[int],
-            cache_dir: str,
-            features_dict: Dict[str, pd.DataFrame],
-            prices_dict: Dict[str, Dict[str, List[float]]],
-        ) -> Dict[str, Any]:
-            """単一foldの処理をラップ（並列化用）"""
-            try:
-                fold_num = fold_info["fold"]
-                train_dates = fold_info["train_dates"]
-                test_dates = fold_info["test_dates"]
-                
-                # Train期間で最適化
-                opt_result = run_optimization_for_fold(
-                    train_dates,
-                    n_trials=n_trials,
-                    study_type=study_type,
-                    seed=seed,
-                    cache_dir=cache_dir,
-                )
-                
-                if opt_result is None:
-                    return {"fold": fold_num, "error": "最適化に失敗しました"}
-                
-                best_params = opt_result["best_params"]
-                best_value = opt_result["best_value"]
-                
-                # Test期間でバックテスト（固定ホライズン）
-                test_perf = run_backtest_with_fixed_params_longterm(
-                    test_dates,
-                    best_params,
-                    horizon_months=horizon_months,
-                    features_dict=features_dict,
-                    prices_dict=prices_dict,
-                )
-                
-                fold_result = {
-                    "fold": fold_num,
-                    "train_start": fold_info["train_start"],
-                    "train_end": fold_info["train_end"],
-                    "test_start": fold_info["test_start"],
-                    "test_end": fold_info["test_end"],
-                    "train_dates_count": len(train_dates),
-                    "test_dates_count": len(test_dates),
-                    "is_holdout": fold_info.get("is_holdout", False),
-                    "optimization": {
-                        "best_value": float(best_value) if best_value is not None else None,
-                        "best_params": best_params,
-                        "n_trials": n_trials,
-                        "best_trial_number": opt_result.get("best_trial_number"),
-                        "study_name": opt_result.get("study_name"),
-                    },
-                    "test_performance": test_perf,
-                }
-                
-                if "validate_dates" in fold_info and len(fold_info.get("validate_dates", [])) > 0:
-                    validate_dates = fold_info["validate_dates"]
-                    fold_result["validate_start"] = fold_info.get("validate_start")
-                    fold_result["validate_end"] = fold_info.get("validate_end")
-                    fold_result["validate_dates_count"] = len(validate_dates)
-                
-                # holdout_eval_yearをfold_resultに含める（並列化時の表示用）
-                if "holdout_eval_year" in fold_info:
-                    fold_result["holdout_eval_year"] = fold_info["holdout_eval_year"]
-                
-                return fold_result
-            except Exception as e:
-                import traceback
-                print(f"  ❌ Fold {fold_info.get('fold', '?')}の処理中にエラー: {e}")
-                traceback.print_exc()
-                return {"fold": fold_info.get("fold", 0), "error": str(e)}
         
         # 並列実行
         with ProcessPoolExecutor(max_workers=n_jobs_fold) as executor:
@@ -815,8 +963,8 @@ def run_walk_forward_analysis_longterm(
                     study_type,
                     seed,
                     cache_dir,
-                    features_dict,
-                    prices_dict,
+                    rebalance_dates,  # 全リバランス日を渡して、各プロセスでキャッシュから再読み込み
+                    n_jobs_optuna,  # Optunaの並列化数
                 ): fold_info["fold"]
                 for fold_info in folds
             }
@@ -856,126 +1004,164 @@ def run_walk_forward_analysis_longterm(
     else:
         # 逐次実行（既存のコード）
         for fold_info in folds:
-        fold_num = fold_info["fold"]
-        train_dates = fold_info["train_dates"]
-        test_dates = fold_info["test_dates"]
-        
-        print()
-        is_holdout = fold_info.get("is_holdout", False)
-        if is_holdout:
-            if "holdout_eval_year" in fold_info:
-                eval_year = fold_info["holdout_eval_year"]
-                print(f"[Fold {fold_num}/{len(folds)}] ⭐ 最終ホールドアウト（評価終了年: {eval_year}年）")
+            fold_num = fold_info["fold"]
+            train_dates = fold_info["train_dates"]
+            test_dates = fold_info["test_dates"]
+            
+            print()
+            is_holdout = fold_info.get("is_holdout", False)
+            if is_holdout:
+                if "holdout_eval_year" in fold_info:
+                    eval_year = fold_info["holdout_eval_year"]
+                    print(f"[Fold {fold_num}/{len(folds)}] ⭐ 最終ホールドアウト（評価終了年: {eval_year}年）")
+                else:
+                    holdout_year = int(fold_info["test_start"].split("-")[0])
+                    print(f"[Fold {fold_num}/{len(folds)}] ⭐ 最終ホールドアウト（{holdout_year}年）")
             else:
-                holdout_year = int(fold_info["test_start"].split("-")[0])
-                print(f"[Fold {fold_num}/{len(folds)}] ⭐ 最終ホールドアウト（{holdout_year}年）")
-        else:
-            print(f"[Fold {fold_num}/{len(folds)}]")
-        print(f"  Train期間: {fold_info['train_start']} ～ {fold_info['train_end']} ({len(train_dates)}日)")
-        if "validate_dates" in fold_info and len(fold_info.get("validate_dates", [])) > 0:
-            validate_dates = fold_info["validate_dates"]
-            print(f"  Validate期間: {fold_info.get('validate_start', 'N/A')} ～ {fold_info.get('validate_end', 'N/A')} ({len(validate_dates)}日)")
-        print(f"  Test期間: {fold_info['test_start']} ～ {fold_info['test_end']} ({len(test_dates)}日)")
-        
-        # 評価終了年ベースの確認（デバッグ用）
-        if "holdout_eval_year" in fold_info:
-            from dateutil.relativedelta import relativedelta
-            from datetime import datetime
-            print(f"  【評価終了年ベースの確認】")
-            print(f"    Test: 評価終了年={fold_info['holdout_eval_year']} → リバランス年={sorted(set([int(d.split('-')[0]) for d in test_dates]))}")
-            if "validate_dates" in fold_info and len(validate_dates) > 0:
-                validate_eval_years = sorted(set([
+                print(f"[Fold {fold_num}/{len(folds)}]")
+            print(f"  Train期間: {fold_info['train_start']} ～ {fold_info['train_end']} ({len(train_dates)}日)")
+            if "validate_dates" in fold_info and len(fold_info.get("validate_dates", [])) > 0:
+                validate_dates = fold_info["validate_dates"]
+                print(f"  Validate期間: {fold_info.get('validate_start', 'N/A')} ～ {fold_info.get('validate_end', 'N/A')} ({len(validate_dates)}日)")
+            print(f"  Test期間: {fold_info['test_start']} ～ {fold_info['test_end']} ({len(test_dates)}日)")
+            
+            # 評価終了年ベースの確認（デバッグ用）
+            if "holdout_eval_year" in fold_info:
+                from dateutil.relativedelta import relativedelta
+                from datetime import datetime
+                print(f"  【評価終了年ベースの確認】")
+                print(f"    Test: 評価終了年={fold_info['holdout_eval_year']} → リバランス年={sorted(set([int(d.split('-')[0]) for d in test_dates]))}")
+                if "validate_dates" in fold_info and len(validate_dates) > 0:
+                    validate_eval_years = sorted(set([
+                        (datetime.strptime(d, "%Y-%m-%d") + relativedelta(months=horizon_months)).year
+                        for d in validate_dates
+                    ]))
+                    print(f"    Validate: 評価終了年={validate_eval_years} → リバランス年={sorted(set([int(d.split('-')[0]) for d in validate_dates]))}")
+                train_eval_years = sorted(set([
                     (datetime.strptime(d, "%Y-%m-%d") + relativedelta(months=horizon_months)).year
-                    for d in validate_dates
+                    for d in train_dates
                 ]))
-                print(f"    Validate: 評価終了年={validate_eval_years} → リバランス年={sorted(set([int(d.split('-')[0]) for d in validate_dates]))}")
-            train_eval_years = sorted(set([
-                (datetime.strptime(d, "%Y-%m-%d") + relativedelta(months=horizon_months)).year
-                for d in train_dates
-            ]))
-            print(f"    Train: 評価終了年={train_eval_years} → リバランス年={sorted(set([int(d.split('-')[0]) for d in train_dates]))}")
-        
-        # Train期間で最適化
-        opt_result = run_optimization_for_fold(
-            train_dates,
-            n_trials=n_trials,
-            study_type=study_type,
-            seed=seed,
-            cache_dir=cache_dir,
-        )
-        
-        if opt_result is None:
-            print(f"  ❌ Fold {fold_num}の最適化に失敗しました")
-            continue
-        
-        best_params = opt_result["best_params"]
-        best_value = opt_result["best_value"]
-        
-        # 最適化結果の詳細は既にrun_optimization_for_fold内で出力済み
-        
-        # Test期間でバックテスト（固定ホライズン）
-        test_perf = run_backtest_with_fixed_params_longterm(
-            test_dates,
-            best_params,
-            horizon_months=horizon_months,
-            features_dict=features_dict,
-            prices_dict=prices_dict,
-        )
-        
-        fold_result = {
-            "fold": fold_num,
-            "train_start": fold_info["train_start"],
-            "train_end": fold_info["train_end"],
-            "test_start": fold_info["test_start"],
-            "test_end": fold_info["test_end"],
-            "train_dates_count": len(train_dates),
-            "test_dates_count": len(test_dates),
-            "is_holdout": is_holdout,
-            "optimization": {
-                "best_value": float(best_value) if best_value is not None else None,
-                "best_params": best_params,
-                "n_trials": n_trials,
-                "best_trial_number": opt_result.get("best_trial_number"),
-                "study_name": opt_result.get("study_name"),
-            },
-            "test_performance": test_perf,
-        }
-        
-        if "validate_dates" in fold_info and len(fold_info.get("validate_dates", [])) > 0:
-            validate_dates = fold_info["validate_dates"]
-            fold_result["validate_start"] = fold_info.get("validate_start")
-            fold_result["validate_end"] = fold_info.get("validate_end")
-            fold_result["validate_dates_count"] = len(validate_dates)
-        
-        fold_results.append(fold_result)
-        
-        print(f"  ✓ Test期間の評価完了")
-        print(f"    年率超過リターン（平均）: {test_perf.get('mean_annual_excess_return_pct', 0):.4f}%")
-        print(f"    年率超過リターン（中央値）: {test_perf.get('median_annual_excess_return_pct', 0):.4f}%")
-        print(f"    勝率: {test_perf.get('win_rate', 0):.2%}")
-        print(f"    ポートフォリオ数: {test_perf.get('num_portfolios', 0)}")
+                print(f"    Train: 評価終了年={train_eval_years} → リバランス年={sorted(set([int(d.split('-')[0]) for d in train_dates]))}")
+            
+            # Train期間で最適化
+            opt_result = run_optimization_for_fold(
+                train_dates,
+                n_trials=n_trials,
+                study_type=study_type,
+                seed=seed,
+                cache_dir=cache_dir,
+                fold_num=fold_num,  # fold番号を渡してstudy_nameに含める
+                n_jobs_optuna=n_jobs_optuna,  # Optunaの並列化数
+            )
+            
+            if opt_result is None:
+                print(f"  ❌ Fold {fold_num}の最適化に失敗しました")
+                continue
+            
+            best_params = opt_result["best_params"]
+            best_value = opt_result["best_value"]
+            
+            # 最適化結果の詳細は既にrun_optimization_for_fold内で出力済み
+            
+            # Test期間でバックテスト（固定ホライズン）
+            test_perf = run_backtest_with_fixed_params_longterm(
+                test_dates,
+                best_params,
+                horizon_months=horizon_months,
+                features_dict=features_dict,
+                prices_dict=prices_dict,
+            )
+            
+            # fold_labelを生成（holdoutの場合は特別なラベル）
+            if is_holdout:
+                if "holdout_eval_year" in fold_info:
+                    fold_label = f"holdout_eval{fold_info['holdout_eval_year']}"
+                else:
+                    holdout_year = int(fold_info["test_start"].split("-")[0])
+                    fold_label = f"holdout_{holdout_year}"
+            else:
+                fold_label = f"fold{fold_num}"
+            
+            fold_result = {
+                "fold": fold_num,
+                "fold_id": fold_num,
+                "fold_label": fold_label,
+                "train_start": fold_info["train_start"],
+                "train_end": fold_info["train_end"],
+                "test_start": fold_info["test_start"],
+                "test_end": fold_info["test_end"],
+                "train_dates": train_dates,  # 全リバランス日を保存
+                "test_dates": test_dates,  # 全リバランス日を保存
+                "train_dates_count": len(train_dates),
+                "test_dates_count": len(test_dates),
+                "is_holdout": is_holdout,
+                "optimization": {
+                    "best_value": float(best_value) if best_value is not None else None,
+                    "best_params": best_params,
+                    "n_trials": n_trials,
+                    "best_trial_number": opt_result.get("best_trial_number"),
+                    "study_name": opt_result.get("study_name"),
+                },
+                "test_performance": {
+                    # 要件に合わせた主要指標
+                    "ann_excess_mean": float(test_perf.get("mean_annual_excess_return_pct", 0)),
+                    "ann_excess_median": float(test_perf.get("median_annual_excess_return_pct", 0)),
+                    "win_rate": float(test_perf.get("win_rate", 0)),
+                    "n_portfolios": int(test_perf.get("num_portfolios", 0)),
+                    # 詳細情報も保持（後方互換性のため）
+                    "mean_annual_excess_return_pct": float(test_perf.get("mean_annual_excess_return_pct", 0)),
+                    "median_annual_excess_return_pct": float(test_perf.get("median_annual_excess_return_pct", 0)),
+                    "mean_annual_return_pct": float(test_perf.get("mean_annual_return_pct", 0)),
+                    "median_annual_return_pct": float(test_perf.get("median_annual_return_pct", 0)),
+                    "num_portfolios": int(test_perf.get("num_portfolios", 0)),
+                },
+            }
+            
+            if "validate_dates" in fold_info and len(fold_info.get("validate_dates", [])) > 0:
+                validate_dates = fold_info["validate_dates"]
+                fold_result["validate_start"] = fold_info.get("validate_start")
+                fold_result["validate_end"] = fold_info.get("validate_end")
+                fold_result["validate_dates"] = validate_dates  # 全リバランス日を保存
+                fold_result["validate_dates_count"] = len(validate_dates)
+            
+            fold_results.append(fold_result)
+            
+            print(f"  ✓ Test期間の評価完了")
+            print(f"    年率超過リターン（平均）: {test_perf.get('mean_annual_excess_return_pct', 0):.4f}%")
+            print(f"    年率超過リターン（中央値）: {test_perf.get('median_annual_excess_return_pct', 0):.4f}%")
+            print(f"    勝率: {test_perf.get('win_rate', 0):.2%}")
+            print(f"    ポートフォリオ数: {test_perf.get('num_portfolios', 0)}")
     
     if not fold_results:
         raise RuntimeError("No fold results were calculated")
     
     # 集計
     test_mean_excess_returns = [
-        r["test_performance"].get("mean_annual_excess_return_pct", 0)
+        r["test_performance"].get("ann_excess_mean", r["test_performance"].get("mean_annual_excess_return_pct", 0))
         for r in fold_results
     ]
     test_median_excess_returns = [
-        r["test_performance"].get("median_annual_excess_return_pct", 0)
+        r["test_performance"].get("ann_excess_median", r["test_performance"].get("median_annual_excess_return_pct", 0))
         for r in fold_results
     ]
     test_win_rates = [
         r["test_performance"].get("win_rate", 0)
         for r in fold_results
     ]
+    test_n_portfolios = [
+        r["test_performance"].get("n_portfolios", r["test_performance"].get("num_portfolios", 0))
+        for r in fold_results
+    ]
     
     mean_mean_excess = np.mean(test_mean_excess_returns) if test_mean_excess_returns else 0.0
     median_mean_excess = np.median(test_mean_excess_returns) if test_mean_excess_returns else 0.0
+    min_mean_excess = np.min(test_mean_excess_returns) if test_mean_excess_returns else 0.0
+    max_mean_excess = np.max(test_mean_excess_returns) if test_mean_excess_returns else 0.0
+    p10_mean_excess = np.percentile(test_mean_excess_returns, 10) if test_mean_excess_returns else 0.0
+    
     mean_median_excess = np.mean(test_median_excess_returns) if test_median_excess_returns else 0.0
     mean_win_rate = np.mean(test_win_rates) if test_win_rates else 0.0
+    min_win_rate = np.min(test_win_rates) if test_win_rates else 0.0
     
     # 結果を表示
     print()
@@ -987,14 +1173,22 @@ def run_walk_forward_analysis_longterm(
     print("Test期間の年率超過リターン（平均）の統計:")
     print(f"  平均: {mean_mean_excess:.4f}%")
     print(f"  中央値: {median_mean_excess:.4f}%")
-    print(f"  最小: {np.min(test_mean_excess_returns) if test_mean_excess_returns else 0:.4f}%")
-    print(f"  最大: {np.max(test_mean_excess_returns) if test_mean_excess_returns else 0:.4f}%")
+    print(f"  最小: {min_mean_excess:.4f}%")
+    print(f"  最大: {max_mean_excess:.4f}%")
+    print(f"  P10（10パーセンタイル）: {p10_mean_excess:.4f}%")
     print()
     print("Test期間の年率超過リターン（中央値）の平均:")
     print(f"  平均: {mean_median_excess:.4f}%")
     print()
-    print("Test期間の勝率の平均:")
+    print("Test期間の勝率の統計:")
     print(f"  平均: {mean_win_rate:.2%}")
+    print(f"  最小: {min_win_rate:.2%}")
+    print()
+    print("各foldのポートフォリオ数:")
+    for r in fold_results:
+        n_port = r["test_performance"].get("n_portfolios", r["test_performance"].get("num_portfolios", 0))
+        fold_label = r.get("fold_label", f"fold{r['fold']}")
+        print(f"  {fold_label}: {n_port}個")
     print()
     
     # 結果を辞書にまとめる
@@ -1010,12 +1204,32 @@ def run_walk_forward_analysis_longterm(
         "fold_type": str(fold_type),
         "fold_results": fold_results,
         "summary": {
+            "n_folds": len(fold_results),
+            "test_ann_excess_mean": {
+                "mean": float(mean_mean_excess),
+                "median": float(median_mean_excess),
+                "min": float(min_mean_excess),
+                "max": float(max_mean_excess),
+                "p10": float(p10_mean_excess),
+            },
+            "test_ann_excess_median": {
+                "mean": float(mean_median_excess),
+            },
+            "test_win_rate": {
+                "mean": float(mean_win_rate),
+                "min": float(min_win_rate),
+            },
+            "n_portfolios_by_fold": {
+                r.get("fold_label", f"fold{r['fold']}"): int(r["test_performance"].get("n_portfolios", r["test_performance"].get("num_portfolios", 0)))
+                for r in fold_results
+            },
+            # 後方互換性のため、旧形式も保持
             "mean_mean_excess_return_pct": float(mean_mean_excess),
             "median_mean_excess_return_pct": float(median_mean_excess),
             "mean_median_excess_return_pct": float(mean_median_excess),
             "mean_win_rate": float(mean_win_rate),
-            "min_mean_excess_return_pct": float(np.min(test_mean_excess_returns)) if test_mean_excess_returns else 0.0,
-            "max_mean_excess_return_pct": float(np.max(test_mean_excess_returns)) if test_mean_excess_returns else 0.0,
+            "min_mean_excess_return_pct": float(min_mean_excess),
+            "max_mean_excess_return_pct": float(max_mean_excess),
         },
     }
     
@@ -1137,6 +1351,12 @@ if __name__ == "__main__":
         help="fold間の並列数（-1で自動、デフォルト: 1（逐次実行））",
     )
     parser.add_argument(
+        "--n-jobs-optuna",
+        type=int,
+        default=-1,
+        help="Optunaの並列数（-1で自動、1で逐次実行、デフォルト: -1）",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -1160,11 +1380,18 @@ if __name__ == "__main__":
             fold_type=args.fold_type,
             holdout_eval_year=args.holdout_eval_year,
             n_jobs_fold=args.n_jobs_fold,
+            n_jobs_optuna=args.n_jobs_optuna,
         )
         
         # 結果をJSONファイルに保存
         if args.output is None:
-            output_file = f"walk_forward_longterm_{args.horizon}M.json"
+            # ファイル名を生成（fold_typeとholdout_eval_yearを含める）
+            if args.fold_type == "roll" and args.holdout_eval_year is not None:
+                output_file = f"walk_forward_longterm_{args.horizon}M_roll_evalYear{args.holdout_eval_year}.json"
+            elif args.fold_type == "roll":
+                output_file = f"walk_forward_longterm_{args.horizon}M_roll.json"
+            else:
+                output_file = f"walk_forward_longterm_{args.horizon}M.json"
         else:
             output_file = args.output
         
@@ -1177,6 +1404,79 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
             raise
+        
+        # params_by_fold.jsonとparams_operational.jsonを保存
+        try:
+            # params_by_fold.json: 各foldのbest_paramsを保存
+            params_by_fold = {}
+            for fold_result in result.get("fold_results", []):
+                fold_label = fold_result.get("fold_label", f"fold{fold_result.get('fold', 'unknown')}")
+                params_by_fold[fold_label] = {
+                    "best_params": fold_result.get("optimization", {}).get("best_params", {}),
+                    "best_value": fold_result.get("optimization", {}).get("best_value"),
+                    "test_ann_excess_mean": fold_result.get("test_performance", {}).get("ann_excess_mean", 0),
+                    "test_win_rate": fold_result.get("test_performance", {}).get("win_rate", 0),
+                }
+            
+            params_by_fold_file = "params_by_fold.json"
+            with open(params_by_fold_file, "w", encoding="utf-8") as f:
+                json.dump(params_by_fold, f, indent=2, ensure_ascii=False)
+            print(f"各foldのパラメータを保存しました: {params_by_fold_file}")
+            
+            # params_operational.json: 暫定運用パラメータを決定して保存
+            # ルール: 全foldのtest ann_excess_meanが最も高いfoldのbest_paramsを採用
+            # （より堅くするなら：ann_excess_meanが正でwin_rateも高いfoldを優先）
+            best_fold = None
+            best_excess_mean = float('-inf')
+            
+            for fold_result in result.get("fold_results", []):
+                test_perf = fold_result.get("test_performance", {})
+                ann_excess_mean = test_perf.get("ann_excess_mean", test_perf.get("mean_annual_excess_return_pct", 0))
+                win_rate = test_perf.get("win_rate", 0)
+                
+                # 暫定ルール: ann_excess_meanが最も高いfoldを選択
+                # （ann_excess_meanが正でwin_rateも高いfoldを優先する場合は、以下の条件を追加）
+                if ann_excess_mean > best_excess_mean:
+                    best_excess_mean = ann_excess_mean
+                    best_fold = fold_result
+            
+            if best_fold:
+                operational_params = {
+                    "selected_fold": best_fold.get("fold_label", f"fold{best_fold.get('fold', 'unknown')}"),
+                    "selection_criteria": "highest_test_ann_excess_mean",
+                    "test_metrics": {
+                        "ann_excess_mean": best_fold.get("test_performance", {}).get("ann_excess_mean", 0),
+                        "ann_excess_median": best_fold.get("test_performance", {}).get("ann_excess_median", 0),
+                        "win_rate": best_fold.get("test_performance", {}).get("win_rate", 0),
+                        "n_portfolios": best_fold.get("test_performance", {}).get("n_portfolios", 0),
+                    },
+                    "best_params": best_fold.get("optimization", {}).get("best_params", {}),
+                    "best_value": best_fold.get("optimization", {}).get("best_value"),
+                    "train_period": {
+                        "start": best_fold.get("train_start"),
+                        "end": best_fold.get("train_end"),
+                    },
+                    "test_period": {
+                        "start": best_fold.get("test_start"),
+                        "end": best_fold.get("test_end"),
+                    },
+                }
+                
+                params_operational_file = "params_operational.json"
+                with open(params_operational_file, "w", encoding="utf-8") as f:
+                    json.dump(operational_params, f, indent=2, ensure_ascii=False)
+                print(f"暫定運用パラメータを保存しました: {params_operational_file}")
+                print(f"  選択fold: {operational_params['selected_fold']}")
+                print(f"  Test年率超過リターン（平均）: {operational_params['test_metrics']['ann_excess_mean']:.4f}%")
+                print(f"  Test勝率: {operational_params['test_metrics']['win_rate']:.2%}")
+            else:
+                print("⚠️  暫定運用パラメータを決定できませんでした（fold結果がありません）")
+                
+        except Exception as e:
+            print(f"⚠️  パラメータファイルの保存中にエラーが発生しました: {e}")
+            import traceback
+            traceback.print_exc()
+            # エラーが発生しても処理は続行
         
         print()
         print("=" * 80)

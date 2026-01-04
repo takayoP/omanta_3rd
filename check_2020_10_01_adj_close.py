@@ -68,3 +68,5 @@ with connect_db() as conn:
         print(f"  全銘柄数: {count['count'].iloc[0] if not count.empty else 0}")
         print(f"  openがNULLでない銘柄数: {open_count['count'].iloc[0] if not open_count.empty else 0}")
 
+
+

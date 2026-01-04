@@ -49,3 +49,5 @@ print("3. bb_weight と rsi_weight は rsi_weight = 1.0 - bb_weight の関係が
 print()
 print("4. 実際の探索空間のサイズは、これらの制約により大幅に縮小されます。")
 
+
+

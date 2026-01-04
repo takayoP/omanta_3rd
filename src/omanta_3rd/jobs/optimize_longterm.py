@@ -123,6 +123,10 @@ def calculate_longterm_performance(
     Returns:
         パフォーマンス指標の辞書
     """
+    print(f"      [calculate_longterm_performance] 関数開始 (rebalance_dates数: {len(rebalance_dates)})")
+    import sys
+    sys.stdout.flush()
+    
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
     
@@ -144,8 +148,13 @@ def calculate_longterm_performance(
     
     portfolios = {}  # {rebalance_date: portfolio_df}
     
+    print(f"      [calculate_longterm_performance] ポートフォリオ選定開始 (n_jobs={n_jobs}, リバランス日数={len(rebalance_dates)})")
+    sys.stdout.flush()
+    
     # 並列実行: ポートフォリオ選定のみ
     if n_jobs > 1 and len(rebalance_dates) > 1:
+        print(f"      [calculate_longterm_performance] 並列実行モード (max_workers={n_jobs})")
+        sys.stdout.flush()
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {
                 executor.submit(
@@ -169,7 +178,11 @@ def calculate_longterm_performance(
                     print(f"エラー ({rebalance_date}): {e}")
     else:
         # 逐次実行
-        for rebalance_date in rebalance_dates:
+        print(f"      [calculate_longterm_performance] 逐次実行モード")
+        sys.stdout.flush()
+        for i, rebalance_date in enumerate(rebalance_dates, 1):
+            print(f"      [calculate_longterm_performance] 処理中 ({i}/{len(rebalance_dates)}): {rebalance_date}")
+            sys.stdout.flush()
             portfolio = _run_single_backtest_portfolio_only(
                 rebalance_date,
                 strategy_params_dict,
@@ -179,12 +192,21 @@ def calculate_longterm_performance(
             )
             if portfolio is not None and not portfolio.empty:
                 portfolios[rebalance_date] = portfolio
+                print(f"      [calculate_longterm_performance] ✓ {rebalance_date}完了 (銘柄数: {len(portfolio)})")
+            else:
+                print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}は空ポートフォリオ")
+            sys.stdout.flush()
     
     if not portfolios:
         raise RuntimeError("No portfolios were generated")
     
+    print(f"      [calculate_longterm_performance] ポートフォリオ選定完了: {len(portfolios)}個")
+    sys.stdout.flush()
+    
     # 各ポートフォリオのパフォーマンスを計算
     # 注意: 最適化中はDBに保存せず、ポートフォリオDataFrameから直接計算
+    print(f"      [calculate_longterm_performance] パフォーマンス計算開始...")
+    sys.stdout.flush()
     performances = []
     with connect_db() as conn:
         # 最新の評価日を取得
@@ -383,9 +405,17 @@ def objective_longterm(
     Returns:
         最適化対象の値（年率超過リターン、TOPIXに対する超過リターン）
     """
+    print(f"    [objective_longterm] 関数開始 (Trial {trial.number})")
+    import sys
+    sys.stdout.flush()
+    
     # StrategyParamsのパラメータ
     # 月次リバランスの最適化結果を参考にせず、広い範囲で探索
+    print(f"    [objective_longterm] パラメータ提案開始...")
+    sys.stdout.flush()
     w_quality = trial.suggest_float("w_quality", 0.05, 0.50)
+    print(f"    [objective_longterm] w_quality取得完了: {w_quality}")
+    sys.stdout.flush()
     w_growth = trial.suggest_float("w_growth", 0.01, 0.30)
     w_record_high = trial.suggest_float("w_record_high", 0.01, 0.20)
     w_size = trial.suggest_float("w_size", 0.05, 0.40)
@@ -424,12 +454,68 @@ def objective_longterm(
     
     w_pbr = 1.0 - w_forward_per
     
-    # 共通パラメータ（Study A/B共通、より広い範囲で探索）
+    # 共通パラメータ（Study A/B共通、以前と同じ範囲に固定、比較の公平性のため）
     liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.10, 0.30)
-    rsi_base = trial.suggest_float("rsi_base", 30.0, 70.0)
-    rsi_max = trial.suggest_float("rsi_max", 70.0, 85.0)
-    bb_z_base = trial.suggest_float("bb_z_base", -3.0, 0.0)
-    bb_z_max = trial.suggest_float("bb_z_max", 1.0, 4.5)
+    
+    # RSIパラメータ（順張り/逆張りを対称に探索）
+    RSI_LOW, RSI_HIGH = 15.0, 85.0
+    rsi_min_width = 20.0  # 最小幅制約（固定値、探索してもOK）
+    
+    # 最初にOptunaでサンプリング
+    rsi_base = trial.suggest_float("rsi_base", RSI_LOW, RSI_HIGH)
+    rsi_max = trial.suggest_float("rsi_max", RSI_LOW, RSI_HIGH)
+    
+    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
+    max_retries = 100  # 最大再試行回数（無限ループ防止）
+    retry_count = 0
+    
+    # trialのシードに基づいた再現可能な乱数生成器を作成
+    # trial.numberとtrial._trial_idを使ってシードを生成
+    trial_seed = hash((trial.number, getattr(trial, '_trial_id', trial.number))) % (2**31)
+    rng = np.random.RandomState(trial_seed)
+    
+    while abs(rsi_max - rsi_base) < rsi_min_width and retry_count < max_retries:
+        rsi_base = rng.uniform(RSI_LOW, RSI_HIGH)
+        rsi_max = rng.uniform(RSI_LOW, RSI_HIGH)
+        retry_count += 1
+    
+    if retry_count > 0:
+        # 再サンプリングした場合は記録
+        trial.set_user_attr("rsi_resampled", True)
+        trial.set_user_attr("rsi_retry_count", retry_count)
+    
+    # 最終的なパラメータを記録
+    trial.set_user_attr("rsi_base_final", rsi_base)
+    trial.set_user_attr("rsi_max_final", rsi_max)
+    
+    # BB Z-scoreパラメータ（順張り/逆張りを対称に探索）
+    BB_LOW, BB_HIGH = -3.5, 3.5
+    bb_z_min_width = 1.0  # 最小幅制約（固定値、探索してもOK）
+    
+    # 最初にOptunaでサンプリング
+    bb_z_base = trial.suggest_float("bb_z_base", BB_LOW, BB_HIGH)
+    bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, BB_HIGH)
+    
+    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
+    # RSIとは別のシード系列を使用（オフセットを追加）
+    bb_trial_seed = (trial_seed + 10000) % (2**31)
+    bb_rng = np.random.RandomState(bb_trial_seed)
+    
+    retry_count = 0
+    while abs(bb_z_max - bb_z_base) < bb_z_min_width and retry_count < max_retries:
+        bb_z_base = bb_rng.uniform(BB_LOW, BB_HIGH)
+        bb_z_max = bb_rng.uniform(BB_LOW, BB_HIGH)
+        retry_count += 1
+    
+    if retry_count > 0:
+        # 再サンプリングした場合は記録
+        trial.set_user_attr("bb_resampled", True)
+        trial.set_user_attr("bb_retry_count", retry_count)
+    
+    # 最終的なパラメータを記録
+    trial.set_user_attr("bb_z_base_final", bb_z_base)
+    trial.set_user_attr("bb_z_max_final", bb_z_max)
+    
     rsi_weight = 1.0 - bb_weight
     
     # StrategyParamsを構築
@@ -457,9 +543,22 @@ def objective_longterm(
         bb_z_max=bb_z_max,
         bb_weight=bb_weight,
         rsi_weight=rsi_weight,
+        rsi_min_width=rsi_min_width,
+        bb_z_min_width=bb_z_min_width,
     )
     
+    # 順張り/逆張りの方向と幅をログに記録
+    rsi_direction = "順張り" if rsi_max > rsi_base else "逆張り"
+    bb_direction = "順張り" if bb_z_max > bb_z_base else "逆張り"
+    trial.set_user_attr("rsi_direction", rsi_direction)
+    trial.set_user_attr("bb_direction", bb_direction)
+    trial.set_user_attr("rsi_width", abs(rsi_max - rsi_base))
+    trial.set_user_attr("bb_z_width", abs(bb_z_max - bb_z_base))
+    
     # バックテスト実行（長期保有型）
+    print(f"    [objective_longterm] calculate_longterm_performance呼び出し...")
+    import sys
+    sys.stdout.flush()
     perf = calculate_longterm_performance(
         train_dates,
         strategy_params,
@@ -469,6 +568,8 @@ def objective_longterm(
         features_dict=features_dict,
         prices_dict=prices_dict,
     )
+    print(f"    [objective_longterm] calculate_longterm_performance完了")
+    sys.stdout.flush()
     
     # 目的関数: 各ポートフォリオの年率超過リターンの平均（TOPIXに対する超過リターン）
     objective_value = perf["mean_annual_excess_return_pct"]
@@ -614,11 +715,15 @@ def main(
     if storage is None:
         storage = f"sqlite:///optuna_{study_name}.db"
     
+    # Optunaのsamplerにシードを設定（再現性のため）
+    sampler = optuna.samplers.TPESampler(seed=random_seed)
+    
     study = optuna.create_study(
         direction="maximize",
         study_name=study_name,
         storage=storage,
         load_if_exists=True,
+        sampler=sampler,
     )
     
     # 並列化設定
@@ -671,6 +776,18 @@ def main(
     print(f"最良試行: {study.best_trial.number}")
     print(f"最良値（年率超過リターン・平均）: {study.best_value:.4f}%")
     print()
+    
+    # 順張り/逆張りの方向と幅を表示
+    best_trial = study.best_trial
+    rsi_direction = best_trial.user_attrs.get("rsi_direction", "不明")
+    bb_direction = best_trial.user_attrs.get("bb_direction", "不明")
+    rsi_width = best_trial.user_attrs.get("rsi_width", None)
+    bb_z_width = best_trial.user_attrs.get("bb_z_width", None)
+    print(f"entry_score方向:")
+    print(f"  RSI: {rsi_direction} (rsi_base={best_trial.params.get('rsi_base', 'N/A'):.2f}, rsi_max={best_trial.params.get('rsi_max', 'N/A'):.2f}, width={rsi_width:.2f if rsi_width else 'N/A'})")
+    print(f"  BB: {bb_direction} (bb_z_base={best_trial.params.get('bb_z_base', 'N/A'):.2f}, bb_z_max={best_trial.params.get('bb_z_max', 'N/A'):.2f}, width={bb_z_width:.2f if bb_z_width else 'N/A'})")
+    print()
+    
     print("最良パラメータ:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value:.6f}")
@@ -723,6 +840,8 @@ def main(
         bb_z_max=best_params["bb_z_max"],
         bb_weight=best_params["bb_weight"],
         rsi_weight=1.0 - best_params["bb_weight"],
+        rsi_min_width=20.0,  # 最小幅制約（固定値）
+        bb_z_min_width=1.0,  # 最小幅制約（固定値）
     )
     
     # テストデータで評価
@@ -835,6 +954,8 @@ def main(
             "bb_z_max": best_params["bb_z_max"],
             "bb_weight": best_params["bb_weight"],
             "rsi_weight": 1.0 - best_params["bb_weight"],
+            "rsi_min_width": 20.0,  # 固定値（最小幅制約）
+            "bb_z_min_width": 1.0,  # 固定値（最小幅制約）
         },
     }
     

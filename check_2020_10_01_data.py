@@ -105,3 +105,5 @@ with connect_db() as conn:
             else:
                 print(f"  ✅ {code}: open={price_row['open'].iloc[0]:.2f}, close={price_row['close'].iloc[0]:.2f}")
 
+
+

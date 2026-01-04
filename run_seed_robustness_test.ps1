@@ -43,3 +43,5 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "エラーコード: $LASTEXITCODE" -ForegroundColor Red
 }
 
+
+

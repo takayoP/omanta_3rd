@@ -95,3 +95,5 @@ python walk_forward_longterm.py `
 
 さらに2027/2028と進むと、24M/36Mも「ホールドアウト年=2025」で成立します。
 
+
+
