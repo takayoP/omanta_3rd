@@ -51,8 +51,8 @@ class EntryScoreParams:
     bb_weight: float = 0.5  # BBとRSIの重み（BB側）
     rsi_weight: float = 0.5  # BBとRSIの重み（RSI側）
     # 最小幅制約（分母が0に近くなるのを防ぐ）
-    rsi_min_width: float = 20.0  # RSIの最小幅（abs(rsi_max - rsi_base) >= rsi_min_width）
-    bb_z_min_width: float = 1.0  # BB Z-scoreの最小幅（abs(bb_z_max - bb_z_base) >= bb_z_min_width）
+    rsi_min_width: float = 10.0  # RSIの最小幅（abs(rsi_max - rsi_base) >= rsi_min_width、緩和: 20.0 → 10.0）
+    bb_z_min_width: float = 0.5  # BB Z-scoreの最小幅（abs(bb_z_max - bb_z_base) >= bb_z_min_width、緩和: 1.0 → 0.5）
 
 
 def _entry_score_with_params(
@@ -86,12 +86,8 @@ def _entry_score_with_params(
                 # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
                 # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
                 raw_score = (z - params.bb_z_base) / bb_z_diff
-                # sigmoid化で張り付きを防ぐ（k=3で滑らかに）
-                # tanh版: score = 0.5 + 0.5 * np.tanh(3 * (raw_score - 0.5))
-                # より滑らかなsigmoid版を使用
-                k = 3.0  # スケーリング係数（大きいほど急峻）
-                sigmoid_score = 1.0 / (1.0 + np.exp(-k * (raw_score - 0.5)))
-                bb_score = sigmoid_score
+                # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
+                bb_score = np.clip(raw_score, 0.0, 1.0)
             else:
                 # 最小幅未満の場合はNaN（無効）
                 bb_score = np.nan
@@ -103,10 +99,8 @@ def _entry_score_with_params(
                 # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
                 # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
                 raw_score = (rsi - params.rsi_base) / rsi_diff
-                # sigmoid化で張り付きを防ぐ
-                k = 3.0  # スケーリング係数
-                sigmoid_score = 1.0 / (1.0 + np.exp(-k * (raw_score - 0.5)))
-                rsi_score = sigmoid_score
+                # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
+                rsi_score = np.clip(raw_score, 0.0, 1.0)
             else:
                 # 最小幅未満の場合はNaN（無効）
                 rsi_score = np.nan

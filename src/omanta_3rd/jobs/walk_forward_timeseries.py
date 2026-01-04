@@ -1,8 +1,13 @@
 """
-Walk-Forward Analysis（時系列版）
+Walk-Forward Analysis（時系列版）【月次リバランス型用】
+
+月次リバランス型のWalk-Forward Analysisスクリプト。
 
 時系列バックテスト（open-close方式）を使用して、Walk-Forward Analysisを実行します。
 過学習の有無を検証するため、train期間で最適化→test期間で固定評価を繰り返します。
+
+【注意】このスクリプトは月次リバランス型専用です。
+長期保有型のWFAには walk_forward_longterm.py を使用してください。
 """
 
 from __future__ import annotations

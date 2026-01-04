@@ -1,4 +1,6 @@
-"""パラメータ最適化システム（Optuna使用、並列計算対応、時系列版）
+"""パラメータ最適化システム（Optuna使用、並列計算対応、時系列版）【月次リバランス型用】
+
+月次リバランス型のパラメータ最適化スクリプト。
 
 時系列P/L計算を使用して、標準的なバックテスト指標を最適化します。
 月次リバランス戦略として、ti→ti+1の月次リターン系列から指標を計算します。
@@ -6,6 +8,9 @@
 【既存版との違い】
 - 既存版（optimize.py）: 各リバランス日から最終日までの累積リターンを使用
 - 時系列版（本ファイル）: 各リバランス日から次のリバランス日までの月次リターンを使用
+
+【注意】このスクリプトは月次リバランス型専用です。
+長期保有型の最適化には optimize_longterm.py を使用してください。
 
 詳細は PERFORMANCE_CALCULATION_METHODS.md を参照してください。
 """
@@ -431,62 +436,75 @@ def objective_timeseries(
     
     # EntryScoreParamsのパラメータ（順張り/逆張りを対称に探索）
     RSI_LOW, RSI_HIGH = 15.0, 85.0
-    rsi_min_width = 20.0  # 最小幅制約（固定値、探索してもOK）
+    rsi_min_width = 10.0  # 最小幅制約（緩和: 20.0 → 10.0）
     
-    # 最初にOptunaでサンプリング
+    # baseを先にサンプリング
     rsi_base = trial.suggest_float("rsi_base", RSI_LOW, RSI_HIGH)
-    rsi_max = trial.suggest_float("rsi_max", RSI_LOW, RSI_HIGH)
     
-    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
-    max_retries = 100  # 最大再試行回数（無限ループ防止）
-    retry_count = 0
+    # baseに対して制約を満たすmaxの範囲を計算
+    # maxは base ± min_width の範囲外から選ぶ必要がある
+    max_low = max(RSI_LOW, rsi_base + rsi_min_width)  # 順張り方向の下限: base + min_width 以上
+    max_high = min(RSI_HIGH, rsi_base - rsi_min_width)  # 逆張り方向の上限: base - min_width 以下
     
-    # trialのシードに基づいた再現可能な乱数生成器を作成
-    # trial.numberとtrial._trial_idを使ってシードを生成
-    trial_seed = hash((trial.number, getattr(trial, '_trial_id', trial.number))) % (2**31)
-    rng = np.random.RandomState(trial_seed)
+    # 制約を満たす範囲が存在するかチェック
+    can_long = (max_low <= RSI_HIGH)  # 順張り方向が可能か
+    can_short = (max_high >= RSI_LOW)  # 逆張り方向が可能か
     
-    while abs(rsi_max - rsi_base) < rsi_min_width and retry_count < max_retries:
-        rsi_base = rng.uniform(RSI_LOW, RSI_HIGH)
-        rsi_max = rng.uniform(RSI_LOW, RSI_HIGH)
-        retry_count += 1
-    
-    if retry_count > 0:
-        # 再サンプリングした場合は記録
-        trial.set_user_attr("rsi_resampled", True)
-        trial.set_user_attr("rsi_retry_count", retry_count)
-    
-    # 最終的なパラメータを記録
-    trial.set_user_attr("rsi_base_final", rsi_base)
-    trial.set_user_attr("rsi_max_final", rsi_max)
+    if can_long and can_short:
+        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+        # 順張り方向: [base + min_width, RSI_HIGH]
+        # 逆張り方向: [RSI_LOW, base - min_width]
+        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
+        if trial.number % 2 == 0:
+            rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+        else:
+            rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+    elif can_long:
+        # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
+        rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+    elif can_short:
+        # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
+        rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+    else:
+        # 制約を満たす範囲が存在しない（通常は発生しない）
+        trial.set_user_attr("prune_reason", "rsi_no_valid_range")
+        raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     # BB Z-scoreパラメータ（順張り/逆張りを対称に探索）
     BB_LOW, BB_HIGH = -3.5, 3.5
-    bb_z_min_width = 1.0  # 最小幅制約
+    bb_z_min_width = 0.5  # 最小幅制約（緩和: 1.0 → 0.5）
     
-    # 最初にOptunaでサンプリング
+    # baseを先にサンプリング
     bb_z_base = trial.suggest_float("bb_z_base", BB_LOW, BB_HIGH)
-    bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, BB_HIGH)
     
-    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
-    # RSIとは別のシード系列を使用（オフセットを追加）
-    bb_trial_seed = (trial_seed + 10000) % (2**31)
-    bb_rng = np.random.RandomState(bb_trial_seed)
+    # baseに対して制約を満たすmaxの範囲を計算
+    # maxは base ± min_width の範囲外から選ぶ必要がある
+    bb_max_low = max(BB_LOW, bb_z_base + bb_z_min_width)  # 順張り方向の下限: base + min_width 以上
+    bb_max_high = min(BB_HIGH, bb_z_base - bb_z_min_width)  # 逆張り方向の上限: base - min_width 以下
     
-    retry_count = 0
-    while abs(bb_z_max - bb_z_base) < bb_z_min_width and retry_count < max_retries:
-        bb_z_base = bb_rng.uniform(BB_LOW, BB_HIGH)
-        bb_z_max = bb_rng.uniform(BB_LOW, BB_HIGH)
-        retry_count += 1
+    # 制約を満たす範囲が存在するかチェック
+    bb_can_long = (bb_max_low <= BB_HIGH)  # 順張り方向が可能か
+    bb_can_short = (bb_max_high >= BB_LOW)  # 逆張り方向が可能か
     
-    if retry_count > 0:
-        # 再サンプリングした場合は記録
-        trial.set_user_attr("bb_resampled", True)
-        trial.set_user_attr("bb_retry_count", retry_count)
-    
-    # 最終的なパラメータを記録
-    trial.set_user_attr("bb_z_base_final", bb_z_base)
-    trial.set_user_attr("bb_z_max_final", bb_z_max)
+    if bb_can_long and bb_can_short:
+        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+        # 順張り方向: [base + min_width, BB_HIGH]
+        # 逆張り方向: [BB_LOW, base - min_width]
+        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
+        if trial.number % 2 == 0:
+            bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+        else:
+            bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+    elif bb_can_long:
+        # 順張り方向のみ可能: [base + min_width, BB_HIGH]
+        bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+    elif bb_can_short:
+        # 逆張り方向のみ可能: [BB_LOW, base - min_width]
+        bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+    else:
+        # 制約を満たす範囲が存在しない（通常は発生しない）
+        trial.set_user_attr("prune_reason", "bb_no_valid_range")
+        raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     bb_weight = trial.suggest_float("bb_weight", 0.45, 0.75)
     rsi_weight = 1.0 - bb_weight

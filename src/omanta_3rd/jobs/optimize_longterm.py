@@ -1,7 +1,12 @@
-"""長期保有型のパラメータ最適化システム
+"""長期保有型のパラメータ最適化システム【長期保有型用】
+
+長期保有型のパラメータ最適化スクリプト。
 
 リバランス日基準でランダムに学習/テストデータを分割し、過学習を抑制します。
 長期保有型なので、月次リバランス型の標準的な評価指標（Sharpe ratio等）は計算しません。
+
+【注意】このスクリプトは長期保有型専用です。
+月次リバランス型の最適化には optimize_timeseries.py を使用してください。
 
 設計:
 - リバランス日をランダムに学習/テストに分割（デフォルト: 80/20）
@@ -22,6 +27,7 @@ from typing import Dict, List, Optional, Tuple, Any, Literal
 import numpy as np
 import pandas as pd
 import optuna
+from optuna.trial import TrialState
 from optuna.visualization import plot_optimization_history, plot_param_importances
 
 from ..infra.db import connect_db
@@ -459,62 +465,75 @@ def objective_longterm(
     
     # RSIパラメータ（順張り/逆張りを対称に探索）
     RSI_LOW, RSI_HIGH = 15.0, 85.0
-    rsi_min_width = 20.0  # 最小幅制約（固定値、探索してもOK）
+    rsi_min_width = 10.0  # 最小幅制約（緩和: 20.0 → 10.0）
     
-    # 最初にOptunaでサンプリング
+    # baseを先にサンプリング
     rsi_base = trial.suggest_float("rsi_base", RSI_LOW, RSI_HIGH)
-    rsi_max = trial.suggest_float("rsi_max", RSI_LOW, RSI_HIGH)
     
-    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
-    max_retries = 100  # 最大再試行回数（無限ループ防止）
-    retry_count = 0
+    # baseに対して制約を満たすmaxの範囲を計算
+    # maxは base ± min_width の範囲外から選ぶ必要がある
+    max_low = max(RSI_LOW, rsi_base + rsi_min_width)  # 順張り方向の下限: base + min_width 以上
+    max_high = min(RSI_HIGH, rsi_base - rsi_min_width)  # 逆張り方向の上限: base - min_width 以下
     
-    # trialのシードに基づいた再現可能な乱数生成器を作成
-    # trial.numberとtrial._trial_idを使ってシードを生成
-    trial_seed = hash((trial.number, getattr(trial, '_trial_id', trial.number))) % (2**31)
-    rng = np.random.RandomState(trial_seed)
+    # 制約を満たす範囲が存在するかチェック
+    can_long = (max_low <= RSI_HIGH)  # 順張り方向が可能か
+    can_short = (max_high >= RSI_LOW)  # 逆張り方向が可能か
     
-    while abs(rsi_max - rsi_base) < rsi_min_width and retry_count < max_retries:
-        rsi_base = rng.uniform(RSI_LOW, RSI_HIGH)
-        rsi_max = rng.uniform(RSI_LOW, RSI_HIGH)
-        retry_count += 1
-    
-    if retry_count > 0:
-        # 再サンプリングした場合は記録
-        trial.set_user_attr("rsi_resampled", True)
-        trial.set_user_attr("rsi_retry_count", retry_count)
-    
-    # 最終的なパラメータを記録
-    trial.set_user_attr("rsi_base_final", rsi_base)
-    trial.set_user_attr("rsi_max_final", rsi_max)
+    if can_long and can_short:
+        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+        # 順張り方向: [base + min_width, RSI_HIGH]
+        # 逆張り方向: [RSI_LOW, base - min_width]
+        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
+        if trial.number % 2 == 0:
+            rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+        else:
+            rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+    elif can_long:
+        # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
+        rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+    elif can_short:
+        # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
+        rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+    else:
+        # 制約を満たす範囲が存在しない（通常は発生しない）
+        trial.set_user_attr("prune_reason", "rsi_no_valid_range")
+        raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     # BB Z-scoreパラメータ（順張り/逆張りを対称に探索）
     BB_LOW, BB_HIGH = -3.5, 3.5
-    bb_z_min_width = 1.0  # 最小幅制約（固定値、探索してもOK）
+    bb_z_min_width = 0.5  # 最小幅制約（緩和: 1.0 → 0.5）
     
-    # 最初にOptunaでサンプリング
+    # baseを先にサンプリング
     bb_z_base = trial.suggest_float("bb_z_base", BB_LOW, BB_HIGH)
-    bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, BB_HIGH)
     
-    # 最小幅制約を満たすまで再サンプリング（trialのシードに基づいて再現可能に）
-    # RSIとは別のシード系列を使用（オフセットを追加）
-    bb_trial_seed = (trial_seed + 10000) % (2**31)
-    bb_rng = np.random.RandomState(bb_trial_seed)
+    # baseに対して制約を満たすmaxの範囲を計算
+    # maxは base ± min_width の範囲外から選ぶ必要がある
+    bb_max_low = max(BB_LOW, bb_z_base + bb_z_min_width)  # 順張り方向の下限: base + min_width 以上
+    bb_max_high = min(BB_HIGH, bb_z_base - bb_z_min_width)  # 逆張り方向の上限: base - min_width 以下
     
-    retry_count = 0
-    while abs(bb_z_max - bb_z_base) < bb_z_min_width and retry_count < max_retries:
-        bb_z_base = bb_rng.uniform(BB_LOW, BB_HIGH)
-        bb_z_max = bb_rng.uniform(BB_LOW, BB_HIGH)
-        retry_count += 1
+    # 制約を満たす範囲が存在するかチェック
+    bb_can_long = (bb_max_low <= BB_HIGH)  # 順張り方向が可能か
+    bb_can_short = (bb_max_high >= BB_LOW)  # 逆張り方向が可能か
     
-    if retry_count > 0:
-        # 再サンプリングした場合は記録
-        trial.set_user_attr("bb_resampled", True)
-        trial.set_user_attr("bb_retry_count", retry_count)
-    
-    # 最終的なパラメータを記録
-    trial.set_user_attr("bb_z_base_final", bb_z_base)
-    trial.set_user_attr("bb_z_max_final", bb_z_max)
+    if bb_can_long and bb_can_short:
+        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+        # 順張り方向: [base + min_width, BB_HIGH]
+        # 逆張り方向: [BB_LOW, base - min_width]
+        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
+        if trial.number % 2 == 0:
+            bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+        else:
+            bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+    elif bb_can_long:
+        # 順張り方向のみ可能: [base + min_width, BB_HIGH]
+        bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+    elif bb_can_short:
+        # 逆張り方向のみ可能: [BB_LOW, base - min_width]
+        bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+    else:
+        # 制約を満たす範囲が存在しない（通常は発生しない）
+        trial.set_user_attr("prune_reason", "bb_no_valid_range")
+        raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     rsi_weight = 1.0 - bb_weight
     
@@ -752,21 +771,61 @@ def main(
     print(f"各試行内のバックテスト並列数: {backtest_n_jobs}")
     print()
     
-    # 最適化実行
-    study.optimize(
-        lambda trial: objective_longterm(
-            trial,
-            train_dates,
-            study_type,
-            cost_bps,
-            backtest_n_jobs,
-            features_dict=features_dict,
-            prices_dict=prices_dict,
-        ),
-        n_trials=n_trials,
-        show_progress_bar=True,
-        n_jobs=optuna_n_jobs,
+    # 最適化実行（完了したtrial数が指定数に達するまでループ）
+    objective_fn = lambda trial: objective_longterm(
+        trial,
+        train_dates,
+        study_type,
+        cost_bps,
+        backtest_n_jobs,
+        features_dict=features_dict,
+        prices_dict=prices_dict,
     )
+    
+    completed_trials = 0
+    iteration = 0
+    max_iterations = n_trials * 3  # 無限ループ防止（最大3倍まで試行）
+    
+    print(f"最適化を開始します（正常に計算が完了したtrial数が{n_trials}に達するまで実行）...")
+    
+    while completed_trials < n_trials and iteration < max_iterations:
+        iteration += 1
+        remaining = n_trials - completed_trials
+        
+        # 残りの試行数を実行
+        # 注意: 進捗バーは既存のtrialも含めてカウントするため、ループで複数回呼ぶと表示がずれる
+        # 実行には影響しないが、表示のため最初のループのみ進捗バーを表示
+        show_progress = (iteration == 1)
+        
+        study.optimize(
+            objective_fn,
+            n_trials=remaining,
+            show_progress_bar=show_progress,  # 最初のループのみ進捗バーを表示
+            n_jobs=optuna_n_jobs,
+        )
+        
+        # 完了したtrial数をカウント（COMPLETE状態のみ = 正常に計算が完了したtrial）
+        completed_trials = len([
+            t for t in study.trials 
+            if t.state == TrialState.COMPLETE
+        ])
+        
+        complete_count = completed_trials
+        pruned_count = len([t for t in study.trials if t.state == TrialState.PRUNED])
+        fail_count = len([t for t in study.trials if t.state == TrialState.FAIL])
+        total_trials = len(study.trials)
+        
+        if completed_trials < n_trials:
+            print(f"  完了trial数: {completed_trials}/{n_trials}（総試行数: {total_trials}, pruned: {pruned_count}, fail: {fail_count}）")
+            print(f"  残り{n_trials - completed_trials}回の正常計算を継続します...")
+    
+    if completed_trials < n_trials:
+        print(f"⚠️  警告: 最大試行回数（{max_iterations}）に達しました。完了trial数: {completed_trials}/{n_trials}")
+    
+    complete_count = completed_trials
+    pruned_count = len([t for t in study.trials if t.state == TrialState.PRUNED])
+    total_trials = len(study.trials)
+    print(f"✓ 最適化完了（完了trial数: {completed_trials}/{n_trials}, 総試行数: {total_trials}, pruned: {pruned_count}）")
     
     # 結果表示
     print()
@@ -840,8 +899,8 @@ def main(
         bb_z_max=best_params["bb_z_max"],
         bb_weight=best_params["bb_weight"],
         rsi_weight=1.0 - best_params["bb_weight"],
-        rsi_min_width=20.0,  # 最小幅制約（固定値）
-        bb_z_min_width=1.0,  # 最小幅制約（固定値）
+        rsi_min_width=10.0,  # 最小幅制約（緩和: 20.0 → 10.0）
+        bb_z_min_width=0.5,  # 最小幅制約（緩和: 1.0 → 0.5）
     )
     
     # テストデータで評価
@@ -954,8 +1013,8 @@ def main(
             "bb_z_max": best_params["bb_z_max"],
             "bb_weight": best_params["bb_weight"],
             "rsi_weight": 1.0 - best_params["bb_weight"],
-            "rsi_min_width": 20.0,  # 固定値（最小幅制約）
-            "bb_z_min_width": 1.0,  # 固定値（最小幅制約）
+            "rsi_min_width": 10.0,  # 固定値（最小幅制約、緩和済み）
+            "bb_z_min_width": 0.5,  # 固定値（最小幅制約、緩和済み）
         },
     }
     

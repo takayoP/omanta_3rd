@@ -18,25 +18,29 @@ python -m omanta_3rd.jobs.monthly_run
 # 特定の日付で実行
 $env:PYTHONPATH="c:\Users\takay\Dropbox\Tama_code\omanta_3rd\src"; python -m omanta_3rd.jobs.monthly_run --asof 2025-12-19
 
-# 特定のリバランス日のポートフォリオの損益を確認
+# ========================================
+# 【月次リバランス用】バックテスト・評価
+# ========================================
+
+# 特定のリバランス日のポートフォリオの損益を確認（月次リバランス用）
 python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19
 
-# 評価日を指定する場合
+# 評価日を指定する場合（月次リバランス用）
 python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --as-of-date 2025-12-20
 
-# すべてのポートフォリオの損益を確認
+# すべてのポートフォリオの損益を確認（月次リバランス用）
 python -m omanta_3rd.jobs.backtest
 
-# CSV形式で出力
+# CSV形式で出力（月次リバランス用）
 python -m omanta_3rd.jobs.backtest --format csv --output backtest_results.csv
 
-特定のポートフォリオのパフォーマンスを計算してDBに保存
+# 特定のポートフォリオのパフォーマンスを計算してDBに保存（月次リバランス用）
 python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --save-to-db
 
-すべてのポートフォリオのパフォーマンスを計算してDBに保存
+# すべてのポートフォリオのパフォーマンスを計算してDBに保存（月次リバランス用）
 python -m omanta_3rd.jobs.backtest --save-to-db
 
-評価日を指定して計算
+# 評価日を指定して計算（月次リバランス用）
 python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --as-of-date 2025-12-20 --save-to-db
 
 企業コードを入力してAPIから取得し、欠損値を確認するスクリプト
@@ -77,8 +81,47 @@ python clear_portfolio_performance.py
 # テーブルクリア　確認なしで実行
 python clear_portfolio_performance.py --yes
 
-# holdout評価を再実行
+# ========================================
+# 【月次リバランス用】評価スクリプト
+# ========================================
+
+# holdout評価を再実行（月次リバランス用）
 python evaluate_candidates_holdout.py --candidates candidates_studyB_20251231_174014.json --holdout-start 2023-01-01 --holdout-end 2024-12-31 --cost-bps 0.0 --output holdout_results_with_holdings.json --use-cache
 
-# 可視化
+# 月次パラメータの長期評価（月次リバランス用）
+python evaluate_monthly_params_on_longterm.py
+
+# コスト感度評価（月次リバランス用）
+python evaluate_cost_sensitivity.py
+
+# 200 trial結果の評価（月次リバランス用）
+python evaluate_200trial_results.py
+
+# パイロット結果の評価（月次リバランス用）
+python evaluate_pilot_results.py
+
+# ========================================
+# 【月次リバランス用】可視化スクリプト
+# ========================================
+
+# 保有銘柄詳細情報の可視化（月次リバランス用）
 python visualize_holdings_details.py
+
+# 保有銘柄の重複可視化（月次リバランス用）
+python visualize_holdings_overlap.py
+
+# エクイティカーブと保有銘柄の可視化（月次リバランス用）
+python visualize_equity_curve_and_holdings.py
+
+# 最適化結果の可視化（月次リバランス用）
+python visualize_optimization.py
+
+# ========================================
+# 【月次リバランス用】データベース保存スクリプト
+# ========================================
+
+# 月次超過リターン等の時系列データをDBに保存（月次リバランス用）
+python save_performance_time_series_to_db.py
+
+# 最終候補をDBに保存（月次リバランス用）
+python save_final_candidates_to_db.py

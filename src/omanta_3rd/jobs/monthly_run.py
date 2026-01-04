@@ -1,9 +1,12 @@
 """
-monthly_run.py
+monthly_run.py（長期保有型用）
 
-Monthly run:
+長期保有型の月次実行スクリプト:
 - Build features snapshot (features_monthly) for a given as-of date
-- Select 20-30 stocks and save to portfolio_monthly
+- Select 20-30 stocks and save to portfolio_monthly（長期保有型用テーブル）
+
+【注意】このスクリプトは長期保有型専用です。
+月次リバランス型の運用には使用しません。
 
 Usage:
   python -m omanta_3rd.jobs.monthly_run --asof 2025-12-12

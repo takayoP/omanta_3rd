@@ -1,8 +1,13 @@
 """
-長期保有型のWalk-Forward検証
+長期保有型のWalk-Forward検証【長期保有型用】
+
+長期保有型のWalk-Forward Analysisスクリプト。
 
 前半期間で最適化→後半期間で評価を複数区間で実行し、実運用の外挿性を確認します。
 ランダム分割seed耐性は確認できたので、最後に時系列で外挿性を確認します。
+
+【注意】このスクリプトは長期保有型専用です。
+月次リバランス型のWFAには walk_forward_timeseries.py を使用してください。
 
 Usage:
     python walk_forward_longterm.py \
@@ -30,6 +35,7 @@ from datetime import datetime as dt
 from dateutil.relativedelta import relativedelta
 from dataclasses import replace, fields
 import optuna
+from optuna.trial import TrialState
 
 from omanta_3rd.infra.db import connect_db
 from omanta_3rd.jobs.optimize_longterm import (
@@ -586,14 +592,51 @@ def run_optimization_for_fold(
         print(f"  ⚡ study.optimize呼び出し直前...")
         sys.stdout.flush()
         
-        study.optimize(
-            timed_objective,
-            n_trials=n_trials,
-            n_jobs=n_jobs_optuna,  # Optunaの並列化を有効化
-            show_progress_bar=True,  # 進捗バーを表示
-        )
+        # 最適化実行（正常に計算が完了したtrial数が指定数に達するまでループ）
+        completed_trials = 0
+        iteration = 0
+        max_iterations = n_trials * 3  # 無限ループ防止（最大3倍まで試行）
         
-        print(f"  ✅ study.optimize完了")
+        print(f"  最適化を開始します（正常に計算が完了したtrial数が{n_trials}に達するまで実行）...")
+        
+        while completed_trials < n_trials and iteration < max_iterations:
+            iteration += 1
+            remaining = n_trials - completed_trials
+            
+            # 残りの試行数を実行
+            # 注意: 進捗バーは既存のtrialも含めてカウントするため、ループで複数回呼ぶと表示がずれる
+            # 実行には影響しないが、表示のため最初のループのみ進捗バーを表示
+            show_progress = (iteration == 1)
+            
+            study.optimize(
+                timed_objective,
+                n_trials=remaining,
+                n_jobs=n_jobs_optuna,  # Optunaの並列化を有効化
+                show_progress_bar=show_progress,  # 最初のループのみ進捗バーを表示
+            )
+            
+            # 完了したtrial数をカウント（COMPLETE状態のみ = 正常に計算が完了したtrial）
+            completed_trials = len([
+                t for t in study.trials 
+                if t.state == TrialState.COMPLETE
+            ])
+            
+            complete_count = completed_trials
+            pruned_count = len([t for t in study.trials if t.state == TrialState.PRUNED])
+            fail_count = len([t for t in study.trials if t.state == TrialState.FAIL])
+            total_trials = len(study.trials)
+            
+            if completed_trials < n_trials:
+                print(f"    完了trial数: {completed_trials}/{n_trials}（総試行数: {total_trials}, pruned: {pruned_count}, fail: {fail_count}）")
+                print(f"    残り{n_trials - completed_trials}回の正常計算を継続します...")
+        
+        if completed_trials < n_trials:
+            print(f"  ⚠️  警告: 最大試行回数（{max_iterations}）に達しました。完了trial数: {completed_trials}/{n_trials}")
+        
+        complete_count = completed_trials
+        pruned_count = len([t for t in study.trials if t.state == TrialState.PRUNED])
+        total_trials = len(study.trials)
+        print(f"  ✅ study.optimize完了（完了trial数: {completed_trials}/{n_trials}, 総試行数: {total_trials}, pruned: {pruned_count}）")
         sys.stdout.flush()
         
         # 最良パラメータを取得

@@ -155,8 +155,8 @@ def build_params_from_json(params_dict: Dict[str, float]) -> tuple[StrategyParam
         bb_z_max=params_dict["bb_z_max"],
         bb_weight=params_dict["bb_weight"],
         rsi_weight=1.0 - params_dict["bb_weight"],
-        rsi_min_width=params_dict.get("rsi_min_width", 20.0),  # デフォルト: 20.0
-        bb_z_min_width=params_dict.get("bb_z_min_width", 1.0),  # デフォルト: 1.0
+        rsi_min_width=params_dict.get("rsi_min_width", 10.0),  # デフォルト: 10.0（緩和済み）
+        bb_z_min_width=params_dict.get("bb_z_min_width", 0.5),  # デフォルト: 0.5（緩和済み）
     )
     
     return strategy_params, entry_params

@@ -1,4 +1,8 @@
-"""バックテスト実行ジョブ"""
+"""バックテスト実行ジョブ（長期保有型・月次リバランス型共通）
+
+長期保有型と月次リバランス型の両方のポートフォリオを評価できます。
+--portfolio-table パラメータで使用するテーブルを選択してください。
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ def main(
     output_format: str = "json",
     output_path: str | None = None,
     save_to_db: bool = False,
+    portfolio_table: str = "portfolio_monthly",
 ):
     """
     バックテストを実行
@@ -30,10 +35,14 @@ def main(
         as_of_date: 評価日（YYYY-MM-DD、Noneの場合は最新の価格データを使用）
         output_format: 出力形式（json, csv）
         output_path: 出力パス（Noneの場合は標準出力）
+        save_to_db: パフォーマンス結果をデータベースに保存するか
+        portfolio_table: ポートフォリオテーブル名
+                         長期保有型: "portfolio_monthly"（デフォルト）
+                         月次リバランス型: "monthly_rebalance_portfolio"
     """
     if rebalance_date:
         # 特定のポートフォリオのパフォーマンスを計算
-        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
+        perf = calculate_portfolio_performance(rebalance_date, as_of_date, portfolio_table)
         
         if "error" in perf:
             print(f"エラー: {perf['error']}")
@@ -67,7 +76,7 @@ def main(
             print(output)
     else:
         # すべてのポートフォリオのパフォーマンスを計算
-        results = calculate_all_portfolios_performance(as_of_date)
+        results = calculate_all_portfolios_performance(as_of_date, portfolio_table)
         
         if output_format == "json":
             output = json.dumps(results, indent=2, ensure_ascii=False)
@@ -130,6 +139,13 @@ if __name__ == "__main__":
         action="store_true",
         help="パフォーマンス結果をデータベースに保存",
     )
+    parser.add_argument(
+        "--portfolio-table",
+        type=str,
+        default="portfolio_monthly",
+        choices=["portfolio_monthly", "monthly_rebalance_portfolio"],
+        help="ポートフォリオテーブル名（長期保有型: portfolio_monthly, 月次リバランス型: monthly_rebalance_portfolio）",
+    )
     
     args = parser.parse_args()
     
@@ -139,5 +155,6 @@ if __name__ == "__main__":
         output_format=args.format,
         output_path=args.output,
         save_to_db=args.save_to_db,
+        portfolio_table=args.portfolio_table,
     )
 
