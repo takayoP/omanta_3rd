@@ -1,9 +1,9 @@
-# Walk-Forward Analysis実行スクリプト（n_trials=100、24M/36M同時実行）
+﻿# Walk-Forward Analysis実行スクリプト（n_trials=100、24M/36M同時実行）
 # 逆張り許可設計で24M/36Mのrollテストを同時に実行します（試行回数100）
 
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host "Walk-Forward Analysis 実行（n_trials=100、24M/36M同時実行）"
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host ""
 
 # パラメータ設定
@@ -78,7 +78,7 @@ Write-Host ""
 Write-Host "実行コマンド（36M）:"
 Write-Host ($cmd36M -join " ")
 Write-Host ""
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host ""
 
 # ログファイル名（タイムスタンプ付き）
@@ -95,21 +95,26 @@ Write-Host ""
 Write-Host "24Mと36Mのテストを同時に開始します..."
 Write-Host ""
 
+# 作業ディレクトリを保存
+$workingDir = (Get-Location).Path
+
+# コマンドを文字列として構築（配列展開の問題を回避）
+$cmd24MStr = ($cmd24M | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+$cmd36MStr = ($cmd36M | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+
 $job24M = Start-Job -ScriptBlock {
-    param($cmdArray, $logFile)
-    $cmd = $cmdArray[0]
-    $args = $cmdArray[1..($cmdArray.Length-1)]
-    & $cmd $args *> $logFile
-} -ArgumentList (,$cmd24M), $log24M
+    param($cmdStr, $logFile, $workDir)
+    Set-Location $workDir
+    Invoke-Expression "$cmdStr *> $logFile"
+} -ArgumentList $cmd24MStr, $log24M, $workingDir
 
 $job36M = Start-Job -ScriptBlock {
-    param($cmdArray, $logFile)
-    $cmd = $cmdArray[0]
-    $args = $cmdArray[1..($cmdArray.Length-1)]
-    & $cmd $args *> $logFile
-} -ArgumentList (,$cmd36M), $log36M
+    param($cmdStr, $logFile, $workDir)
+    Set-Location $workDir
+    Invoke-Expression "$cmdStr *> $logFile"
+} -ArgumentList $cmd36MStr, $log36M, $workingDir
 
-Write-Host "✅ 両方のジョブを開始しました"
+Write-Host "[OK] 両方のジョブを開始しました"
 Write-Host ""
 Write-Host "進行状況を監視中..."
 Write-Host "（Ctrl+Cで中断できますが、ジョブはバックグラウンドで継続します）"
@@ -141,9 +146,9 @@ while ($job24M.State -eq "Running" -or $job36M.State -eq "Running") {
 
 # 結果を取得
 Write-Host ""
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host "実行結果"
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host ""
 
 $result24M = Receive-Job -Job $job24M
@@ -153,23 +158,23 @@ Remove-Job -Job $job24M, $job36M
 
 Write-Host "24Mテスト:"
 if ($job24M.State -eq "Completed") {
-    Write-Host "  ✅ 正常に完了しました"
+    Write-Host "  [OK] 正常に完了しました"
 } else {
-    Write-Host "  ❌ エラーまたは中断されました（状態: $($job24M.State)）"
+    Write-Host "  [NG] エラーまたは中断されました（状態: $($job24M.State)）"
 }
 Write-Host "  ログ: $log24M"
 Write-Host ""
 
 Write-Host "36Mテスト:"
 if ($job36M.State -eq "Completed") {
-    Write-Host "  ✅ 正常に完了しました"
+    Write-Host "  [OK] 正常に完了しました"
 } else {
-    Write-Host "  ❌ エラーまたは中断されました（状態: $($job36M.State)）"
+    Write-Host "  [NG] エラーまたは中断されました（状態: $($job36M.State)）"
 }
 Write-Host "  ログ: $log36M"
 Write-Host ""
 
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 Write-Host "完了"
-Write-Host "=" * 80
+Write-Host ("=" * 80)
 
