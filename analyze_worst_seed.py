@@ -23,12 +23,12 @@ from omanta_3rd.jobs.optimize_longterm import (
     get_monthly_rebalance_dates,
     EntryScoreParams,
 )
-from omanta_3rd.jobs.monthly_run import StrategyParams
+from omanta_3rd.jobs.longterm_run import StrategyParams
 from omanta_3rd.backtest.feature_cache import FeatureCache
 from omanta_3rd.backtest.performance import calculate_portfolio_performance
 from omanta_3rd.infra.db import connect_db
 from omanta_3rd.jobs.optimize import _select_portfolio_with_params
-from omanta_3rd.jobs.monthly_run import save_portfolio
+from omanta_3rd.jobs.longterm_run import save_portfolio
 
 
 def load_best_params(json_file: str) -> Dict[str, Any]:

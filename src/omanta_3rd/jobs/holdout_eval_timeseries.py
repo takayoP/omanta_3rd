@@ -21,12 +21,12 @@ from typing import Dict, Any, Optional
 import subprocess
 
 from ..infra.db import connect_db
-from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
+from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..jobs.optimize_timeseries import (
     run_backtest_for_optimization_timeseries,
     objective_timeseries,
 )
-from ..jobs.monthly_run import StrategyParams
+from ..jobs.longterm_run import StrategyParams
 from ..jobs.optimize import EntryScoreParams
 from ..backtest.timeseries import calculate_timeseries_returns
 from ..backtest.eval_common import calculate_metrics_from_timeseries_data

@@ -18,9 +18,9 @@ import numpy as np
 import pandas as pd
 import optuna
 
-from src.omanta_3rd.jobs.monthly_run import StrategyParams
+from src.omanta_3rd.jobs.longterm_run import StrategyParams
 from src.omanta_3rd.jobs.optimize import EntryScoreParams
-from src.omanta_3rd.jobs.batch_monthly_run import get_monthly_rebalance_dates
+from src.omanta_3rd.jobs.batch_longterm_run import get_monthly_rebalance_dates
 from src.omanta_3rd.jobs.optimize_longterm import (
     calculate_longterm_performance,
     split_rebalance_dates,

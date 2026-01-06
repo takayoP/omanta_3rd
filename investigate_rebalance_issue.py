@@ -13,7 +13,7 @@ import pandas as pd
 from datetime import datetime
 
 from src.omanta_3rd.infra.db import connect_db
-from src.omanta_3rd.jobs.batch_monthly_run import get_monthly_rebalance_dates
+from src.omanta_3rd.jobs.batch_longterm_run import get_monthly_rebalance_dates
 from src.omanta_3rd.backtest.performance import _get_next_trading_day
 
 

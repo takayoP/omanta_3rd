@@ -20,10 +20,10 @@ from test_seed_robustness_fixed_horizon import (
 )
 from omanta_3rd.backtest.feature_cache import FeatureCache
 from omanta_3rd.jobs.optimize_timeseries import _run_single_backtest_portfolio_only
-from omanta_3rd.jobs.monthly_run import save_portfolio
+from omanta_3rd.jobs.longterm_run import save_portfolio
 from omanta_3rd.backtest.performance import calculate_portfolio_performance
 from dataclasses import fields
-from omanta_3rd.jobs.monthly_run import StrategyParams
+from omanta_3rd.jobs.longterm_run import StrategyParams
 from omanta_3rd.jobs.optimize import EntryScoreParams
 
 def load_wf_result(json_file: str) -> dict:

@@ -15,7 +15,7 @@ import pandas as pd
 from omanta_3rd.infra.db import connect_db
 from omanta_3rd.infra.jquants import JQuantsClient
 from omanta_3rd.ingest.listed import fetch_listed_info, save_listed_info
-from omanta_3rd.jobs.batch_monthly_run import get_last_trading_day_of_month
+from omanta_3rd.jobs.batch_longterm_run import get_last_trading_day_of_month
 
 
 def get_monthly_dates(start_date: str, end_date: str) -> List[str]:

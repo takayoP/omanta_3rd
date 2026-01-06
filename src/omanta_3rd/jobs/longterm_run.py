@@ -1,5 +1,5 @@
 """
-monthly_run.py（長期保有型用）
+longterm_run.py（長期保有型用）
 
 長期保有型の月次実行スクリプト:
 - Build features snapshot (features_monthly) for a given as-of date
@@ -9,7 +9,7 @@ monthly_run.py（長期保有型用）
 月次リバランス型の運用には使用しません。
 
 Usage:
-  python -m omanta_3rd.jobs.monthly_run --asof 2025-12-12
+  python -m omanta_3rd.jobs.longterm_run --asof 2025-12-12
 """
 
 from __future__ import annotations
@@ -1134,11 +1134,16 @@ def _load_latest_forecast(conn, asof: str) -> pd.DataFrame:
 # Feature building
 # -----------------------------
 
-def build_features(conn, asof: str) -> pd.DataFrame:
+def build_features(
+    conn,
+    asof: str,
+    strategy_params: Optional[StrategyParams] = None,
+    entry_params: Optional[Any] = None,  # EntryScoreParams（循環参照回避のためAny）
+) -> pd.DataFrame:
     price_date = _snap_price_date(conn, asof)
     listed_date = _snap_listed_date(conn, price_date)
 
-    print(f"[monthly] asof requested={asof} | price_date={price_date} | listed_date={listed_date}")
+    print(f"[longterm] asof requested={asof} | price_date={price_date} | listed_date={listed_date}")
 
     universe = _load_universe(conn, listed_date)
     print(f"[count] universe (Prime): {len(universe)}")
@@ -1568,16 +1573,27 @@ def build_features(conn, asof: str) -> pd.DataFrame:
         print(f"  sample codes: {forecast_profit_only['code'].head(10).tolist()}")
 
     # Entry score
-    if PARAMS.use_entry_score:
-        close_map = {c: g["adj_close"].reset_index(drop=True) for c, g in prices_win.groupby("code")}
-        df["entry_score"] = df["code"].apply(lambda c: _entry_score(close_map.get(c)) if c in close_map else np.nan)
+    # パラメータが渡された場合はそれを使用、そうでない場合は既存のPARAMSを使用
+    use_entry_score = (strategy_params.use_entry_score if strategy_params else PARAMS.use_entry_score)
+    
+    if use_entry_score:
+        if entry_params:
+            # パラメータ化版のentry_score計算を使用
+            df = _calculate_entry_score_with_params(df, prices_win, entry_params)
+        else:
+            # 既存の_entry_score関数を使用（PARAMSを使用）
+            close_map = {c: g["adj_close"].reset_index(drop=True) for c, g in prices_win.groupby("code")}
+            df["entry_score"] = df["code"].apply(lambda c: _entry_score(close_map.get(c)) if c in close_map else np.nan)
     else:
         df["entry_score"] = np.nan
 
     # Industry-relative valuation scores
     df["forward_per_pct"] = df.groupby("sector33")["forward_per"].transform(lambda s: _pct_rank(s, ascending=True))
     df["pbr_pct"] = df.groupby("sector33")["pbr"].transform(lambda s: _pct_rank(s, ascending=True))
-    df["value_score"] = PARAMS.w_forward_per * (1.0 - df["forward_per_pct"]) + PARAMS.w_pbr * (1.0 - df["pbr_pct"])
+    # パラメータが渡された場合はそれを使用、そうでない場合は既存のPARAMSを使用
+    w_forward_per = (strategy_params.w_forward_per if strategy_params else PARAMS.w_forward_per)
+    w_pbr = (strategy_params.w_pbr if strategy_params else PARAMS.w_pbr)
+    df["value_score"] = w_forward_per * (1.0 - df["forward_per_pct"]) + w_pbr * (1.0 - df["pbr_pct"])
 
     # Size score
     # 大きいほど高スコア（時価総額が大きい銘柄を好む）
@@ -1614,12 +1630,19 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     df["record_high_score"] = df["record_high_score"].fillna(0.0)
 
     # Core score
+    # パラメータが渡された場合はそれを使用、そうでない場合は既存のPARAMSを使用
+    w_quality = (strategy_params.w_quality if strategy_params else PARAMS.w_quality)
+    w_value = (strategy_params.w_value if strategy_params else PARAMS.w_value)
+    w_growth = (strategy_params.w_growth if strategy_params else PARAMS.w_growth)
+    w_record_high = (strategy_params.w_record_high if strategy_params else PARAMS.w_record_high)
+    w_size = (strategy_params.w_size if strategy_params else PARAMS.w_size)
+    
     df["core_score"] = (
-        PARAMS.w_quality * df["quality_score"] +
-        PARAMS.w_value * df["value_score"] +
-        PARAMS.w_growth * df["growth_score"] +
-        PARAMS.w_record_high * df["record_high_score"] +
-        PARAMS.w_size * df["size_score"]
+        w_quality * df["quality_score"] +
+        w_value * df["value_score"] +
+        w_growth * df["growth_score"] +
+        w_record_high * df["record_high_score"] +
+        w_size * df["size_score"]
     )
 
     df["core_score"] = df["core_score"].fillna(0.0)
@@ -1677,12 +1700,14 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     }
     
     # 各サブスコアの重み
+    # パラメータが渡された場合はそれを使用、そうでない場合は既存のPARAMSを使用
+    params_for_weights = strategy_params if strategy_params else PARAMS
     weights = {
-        "quality_score": PARAMS.w_quality,
-        "value_score": PARAMS.w_value,
-        "growth_score": PARAMS.w_growth,
-        "record_high_score": PARAMS.w_record_high,
-        "size_score": PARAMS.w_size,
+        "quality_score": params_for_weights.w_quality,
+        "value_score": params_for_weights.w_value,
+        "growth_score": params_for_weights.w_growth,
+        "record_high_score": params_for_weights.w_record_high,
+        "size_score": params_for_weights.w_size,
     }
     
     # 不完全なスコアがデフォルト値（0.5または0.0）を使っている場合の影響度を計算
@@ -1745,9 +1770,11 @@ def build_features(conn, asof: str) -> pd.DataFrame:
     
     # フィルタ後の不完全なスコアの割合
     if "liquidity_60d" in df.columns and "roe" in df.columns:
+        # パラメータが渡された場合はそれを使用、そうでない場合は既存のPARAMSを使用
+        params_for_filter = strategy_params if strategy_params else PARAMS
         # 流動性フィルタとROEフィルタを適用
-        after_liquidity = df[df["liquidity_60d"] >= df["liquidity_60d"].quantile(PARAMS.liquidity_quantile_cut)]
-        after_roe = after_liquidity[after_liquidity["roe"] >= PARAMS.roe_min] if len(after_liquidity) > 0 else pd.DataFrame()
+        after_liquidity = df[df["liquidity_60d"] >= df["liquidity_60d"].quantile(params_for_filter.liquidity_quantile_cut)]
+        after_roe = after_liquidity[after_liquidity["roe"] >= params_for_filter.roe_min] if len(after_liquidity) > 0 else pd.DataFrame()
         
         if len(after_roe) > 0:
             incomplete_after_filters = (
@@ -1759,7 +1786,7 @@ def build_features(conn, asof: str) -> pd.DataFrame:
             print(f"\n  [フィルタ後] 不完全なcore_scoreの割合: {incomplete_after_filters.sum()}/{len(after_roe)} ({incomplete_after_pct:.1f}%)")
             
             # プールサイズの銘柄についても確認
-            pool = after_roe.sort_values("core_score", ascending=False).head(PARAMS.pool_size) if len(after_roe) > 0 else pd.DataFrame()
+            pool = after_roe.sort_values("core_score", ascending=False).head(params_for_filter.pool_size) if len(after_roe) > 0 else pd.DataFrame()
             if len(pool) > 0:
                 incomplete_pool = (
                     pool["forward_per"].isna() | pool["pbr"].isna() |
@@ -1789,7 +1816,10 @@ def build_features(conn, asof: str) -> pd.DataFrame:
 # Selection
 # -----------------------------
 
-def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
+def select_portfolio(
+    feat: pd.DataFrame,
+    strategy_params: Optional[StrategyParams] = None,
+) -> pd.DataFrame:
     if feat.empty:
         return feat
 
@@ -1797,14 +1827,17 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
 
     f = feat.copy()
 
+    # パラメータが渡された場合はそれを使用、そうでない場合は既存のPARAMSを使用
+    params = strategy_params if strategy_params else PARAMS
+    
     # liquidity filter
-    q = f["liquidity_60d"].quantile(PARAMS.liquidity_quantile_cut)
+    q = f["liquidity_60d"].quantile(params.liquidity_quantile_cut)
     f = f[(f["liquidity_60d"].notna()) & (f["liquidity_60d"] >= q)]
-    print(f"[count] after liquidity filter: {len(f)} (cut={PARAMS.liquidity_quantile_cut}, q={q})")
+    print(f"[count] after liquidity filter: {len(f)} (cut={params.liquidity_quantile_cut}, q={q})")
 
     # ROE threshold
-    f = f[(f["roe"].notna()) & (f["roe"] >= PARAMS.roe_min)]
-    print(f"[count] after ROE>= {PARAMS.roe_min}: {len(f)}")
+    f = f[(f["roe"].notna()) & (f["roe"] >= params.roe_min)]
+    print(f"[count] after ROE>= {params.roe_min}: {len(f)}")
 
 
     if f.empty:
@@ -1812,11 +1845,11 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     # Pool by core score
-    pool = f.sort_values("core_score", ascending=False).head(PARAMS.pool_size).copy()
+    pool = f.sort_values("core_score", ascending=False).head(params.pool_size).copy()
     print(f"[count] pool size: {len(pool)}")
 
     # Sort by entry_score first (optional)
-    if PARAMS.use_entry_score:
+    if params.use_entry_score:
         pool = pool.sort_values(["entry_score", "core_score"], ascending=[False, False])
 
     # Apply sector cap
@@ -1825,16 +1858,16 @@ def select_portfolio(feat: pd.DataFrame) -> pd.DataFrame:
 
     for _, r in pool.iterrows():
         sec = r.get("sector33") or "UNKNOWN"
-        if sector_counts.get(sec, 0) >= PARAMS.sector_cap:
+        if sector_counts.get(sec, 0) >= params.sector_cap:
             continue
         sector_counts[sec] = sector_counts.get(sec, 0) + 1
         selected_rows.append(r)
-        if len(selected_rows) >= PARAMS.target_max:
+        if len(selected_rows) >= params.target_max:
             break
 
-    if len(selected_rows) < PARAMS.target_min:
+    if len(selected_rows) < params.target_min:
         print(f"[warn] too few after sector cap ({len(selected_rows)}). Relaxing sector cap.")
-        selected_rows = pool.head(PARAMS.target_max).to_dict("records")
+        selected_rows = pool.head(params.target_max).to_dict("records")
 
     sel = pd.DataFrame(selected_rows)
     if sel.empty:
@@ -1910,26 +1943,26 @@ def save_portfolio_for_rebalance(conn, pf: pd.DataFrame):
 
 def main(asof: Optional[str] = None):
     run_date = asof or EXECUTION_DATE or datetime.now().strftime("%Y-%m-%d")
-    print(f"[monthly] start | asof={run_date}")
+    print(f"[longterm] start | asof={run_date}")
 
     with connect_db() as conn:
         feat = build_features(conn, run_date)
-        print(f"[monthly] features built: {len(feat)} codes")
+        print(f"[longterm] features built: {len(feat)} codes")
 
         save_features(conn, feat)
 
         pf = select_portfolio(feat)
-        print(f"[monthly] selected: {len(pf)} codes")
+        print(f"[longterm] selected: {len(pf)} codes")
 
         save_portfolio(conn, pf)
 
 
 
-    print("[monthly] done")
+    print("[longterm] done")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Monthly run (feature build & selection)")
+    parser = argparse.ArgumentParser(description="Long-term run (feature build & selection)【長期保有型用】")
     parser.add_argument("--asof", type=str, help="As-of date (YYYY-MM-DD)")
     args = parser.parse_args()
     main(asof=args.asof)

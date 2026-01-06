@@ -16,7 +16,7 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..infra.db import connect_db
-from ..jobs.monthly_run import build_features
+from ..jobs.longterm_run import build_features
 
 
 class FeatureCache:

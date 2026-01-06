@@ -43,7 +43,7 @@ except ImportError:
     TKINTER_AVAILABLE = False
 
 from ..infra.db import connect_db
-from ..jobs.monthly_run import (
+from ..jobs.longterm_run import (
     StrategyParams,
     build_features,
     select_portfolio,
@@ -51,12 +51,12 @@ from ..jobs.monthly_run import (
     save_portfolio,
     save_portfolio_for_rebalance,
 )
+from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..backtest.timeseries import calculate_timeseries_returns, calculate_timeseries_returns_from_portfolios
 from ..backtest.metrics import (
     calculate_sharpe_ratio,
     calculate_win_rate_timeseries,
 )
-from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
 from ..backtest.feature_cache import FeatureCache
 
 # 既存のoptimize.pyから必要な関数をインポート
@@ -369,6 +369,7 @@ def objective_timeseries(
     features_dict: Optional[Dict[str, pd.DataFrame]] = None,
     prices_dict: Optional[Dict[str, Dict[str, List[float]]]] = None,
     save_to_db: bool = True,
+    entry_mode: str = "free",
 ) -> float:
     """
     Optunaの目的関数（時系列版）
@@ -450,25 +451,40 @@ def objective_timeseries(
     can_long = (max_low <= RSI_HIGH)  # 順張り方向が可能か
     can_short = (max_high >= RSI_LOW)  # 逆張り方向が可能か
     
-    if can_long and can_short:
-        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
-        # 順張り方向: [base + min_width, RSI_HIGH]
-        # 逆張り方向: [RSI_LOW, base - min_width]
-        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
-        if trial.number % 2 == 0:
-            rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
-        else:
-            rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
-    elif can_long:
-        # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
+    # entry_modeに応じた制約
+    if entry_mode == "mom":
+        # 順張り方向を強制
+        if not can_long:
+            trial.set_user_attr("prune_reason", "rsi_mom_not_possible")
+            raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して順張り方向が不可能です")
         rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
-    elif can_short:
-        # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
+    elif entry_mode == "rev":
+        # 逆張り方向を強制
+        if not can_short:
+            trial.set_user_attr("prune_reason", "rsi_rev_not_possible")
+            raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して逆張り方向が不可能です")
         rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
     else:
-        # 制約を満たす範囲が存在しない（通常は発生しない）
-        trial.set_user_attr("prune_reason", "rsi_no_valid_range")
-        raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
+        # freeモード: 両方向を探索
+        if can_long and can_short:
+            # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+            # 順張り方向: [base + min_width, RSI_HIGH]
+            # 逆張り方向: [RSI_LOW, base - min_width]
+            # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
+            if trial.number % 2 == 0:
+                rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+            else:
+                rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+        elif can_long:
+            # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
+            rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+        elif can_short:
+            # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
+            rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+        else:
+            # 制約を満たす範囲が存在しない（通常は発生しない）
+            trial.set_user_attr("prune_reason", "rsi_no_valid_range")
+            raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     # BB Z-scoreパラメータ（順張り/逆張りを対称に探索）
     BB_LOW, BB_HIGH = -3.5, 3.5
@@ -486,25 +502,40 @@ def objective_timeseries(
     bb_can_long = (bb_max_low <= BB_HIGH)  # 順張り方向が可能か
     bb_can_short = (bb_max_high >= BB_LOW)  # 逆張り方向が可能か
     
-    if bb_can_long and bb_can_short:
-        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
-        # 順張り方向: [base + min_width, BB_HIGH]
-        # 逆張り方向: [BB_LOW, base - min_width]
-        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
-        if trial.number % 2 == 0:
-            bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
-        else:
-            bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
-    elif bb_can_long:
-        # 順張り方向のみ可能: [base + min_width, BB_HIGH]
+    # entry_modeに応じた制約
+    if entry_mode == "mom":
+        # 順張り方向を強制
+        if not bb_can_long:
+            trial.set_user_attr("prune_reason", "bb_mom_not_possible")
+            raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して順張り方向が不可能です")
         bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
-    elif bb_can_short:
-        # 逆張り方向のみ可能: [BB_LOW, base - min_width]
+    elif entry_mode == "rev":
+        # 逆張り方向を強制
+        if not bb_can_short:
+            trial.set_user_attr("prune_reason", "bb_rev_not_possible")
+            raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して逆張り方向が不可能です")
         bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
     else:
-        # 制約を満たす範囲が存在しない（通常は発生しない）
-        trial.set_user_attr("prune_reason", "bb_no_valid_range")
-        raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
+        # freeモード: 両方向を探索
+        if bb_can_long and bb_can_short:
+            # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+            # 順張り方向: [base + min_width, BB_HIGH]
+            # 逆張り方向: [BB_LOW, base - min_width]
+            # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
+            if trial.number % 2 == 0:
+                bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+            else:
+                bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+        elif bb_can_long:
+            # 順張り方向のみ可能: [base + min_width, BB_HIGH]
+            bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+        elif bb_can_short:
+            # 逆張り方向のみ可能: [BB_LOW, base - min_width]
+            bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+        else:
+            # 制約を満たす範囲が存在しない（通常は発生しない）
+            trial.set_user_attr("prune_reason", "bb_no_valid_range")
+            raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     bb_weight = trial.suggest_float("bb_weight", 0.45, 0.75)
     rsi_weight = 1.0 - bb_weight
@@ -600,6 +631,7 @@ def main(
     storage: Optional[str] = None,
     no_db_write: bool = False,
     cache_dir: str = "cache/features",
+    entry_mode: str = "free",
 ):
     """
     最適化を実行（時系列版、特徴量キャッシュ対応）
@@ -628,6 +660,7 @@ def main(
     print(f"試行回数: {n_trials}")
     print(f"取引コスト: {cost_bps} bps")
     print(f"並列化モード: {parallel_mode}")
+    print(f"Entry mode: {entry_mode}")
     print("=" * 80)
     print()
     
@@ -820,6 +853,7 @@ def main(
             features_dict=features_dict,
             prices_dict=prices_dict,
             save_to_db=not no_db_write,
+            entry_mode=entry_mode,
         ),
         n_trials=n_trials,
         show_progress_bar=True,
@@ -895,7 +929,25 @@ def main(
     normalized_best_params["w_record_high"] = w_record_high_norm
     normalized_best_params["w_size"] = w_size_norm
     
-    result_file = f"optimization_result_{study_name}.json"
+    # 結果ファイル名をentry_modeに応じて決定
+    if entry_mode == "mom":
+        # 順張りモードの場合は専用ファイル名
+        if study_name:
+            result_file = f"monthly_params_mom_{study_name}.json"
+        else:
+            result_file = f"monthly_params_mom_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    elif entry_mode == "rev":
+        # 逆張りモードの場合は専用ファイル名
+        if study_name:
+            result_file = f"monthly_params_rev_{study_name}.json"
+        else:
+            result_file = f"monthly_params_rev_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    else:
+        # freeモードの場合は従来のファイル名
+        if study_name:
+            result_file = f"optimization_result_optimization_timeseries_{study_name}.json"
+        else:
+            result_file = f"optimization_result_optimization_timeseries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -904,7 +956,8 @@ def main(
                 "best_params_raw": best_params_raw,  # 元の値を保存
                 "n_trials": n_trials,
                 "calculation_method": "timeseries",
-                "description": "時系列P/L計算を使用した最適化",
+                "entry_mode": entry_mode,
+                "description": f"時系列P/L計算を使用した最適化（entry_mode: {entry_mode}）",
             },
             f,
             indent=2,
@@ -1034,6 +1087,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-progress-window", action="store_true", help="進捗ウィンドウを表示しない")
     parser.add_argument("--no-db-write", action="store_true", help="最適化中にDBに書き込まない")
     parser.add_argument("--cache-dir", type=str, default="cache/features", help="キャッシュディレクトリ（デフォルト: cache/features）")
+    parser.add_argument("--entry-mode", type=str, default="free", choices=["free", "mom", "rev"],
+                        help="entry_mode: free（両方向探索）、mom（順張り強制）、rev（逆張り強制）")
     
     args = parser.parse_args()
     
@@ -1050,5 +1105,6 @@ if __name__ == "__main__":
         show_progress_window=not args.no_progress_window,
         no_db_write=args.no_db_write,
         cache_dir=args.cache_dir,
+        entry_mode=args.entry_mode,
     )
 

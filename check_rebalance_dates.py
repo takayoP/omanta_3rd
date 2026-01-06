@@ -1,5 +1,5 @@
 """リバランス日の確認スクリプト"""
-from omanta_3rd.jobs.batch_monthly_run import get_monthly_rebalance_dates
+from omanta_3rd.jobs.batch_longterm_run import get_monthly_rebalance_dates
 
 dates = get_monthly_rebalance_dates('2021-01-01', '2025-12-31')
 print(f'リバランス日数: {len(dates)}')

@@ -11,13 +11,13 @@ import sys
 from typing import List, Dict, Any
 
 from omanta_3rd.infra.db import connect_db
-from omanta_3rd.jobs.monthly_run import (
+from omanta_3rd.jobs.longterm_run import (
     build_features,
     select_portfolio,
     save_features,
     save_portfolio,
 )
-from omanta_3rd.jobs.batch_monthly_run import get_monthly_rebalance_dates
+from omanta_3rd.jobs.batch_longterm_run import get_monthly_rebalance_dates
 from omanta_3rd.backtest.performance import (
     calculate_portfolio_performance,
     save_performance_to_db,

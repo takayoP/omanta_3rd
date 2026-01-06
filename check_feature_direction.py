@@ -15,7 +15,7 @@ from dateutil.relativedelta import relativedelta
 from omanta_3rd.infra.db import connect_db
 from omanta_3rd.backtest.feature_cache import FeatureCache
 from omanta_3rd.backtest.performance import calculate_portfolio_performance
-from omanta_3rd.jobs.monthly_run import save_portfolio
+from omanta_3rd.jobs.longterm_run import save_portfolio
 
 def get_future_return(conn, code: str, rebalance_date: str, horizon_months: int) -> float:
     """指定されたリバランス日からhorizon_months後のリターンを取得"""

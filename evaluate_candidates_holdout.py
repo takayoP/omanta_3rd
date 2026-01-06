@@ -20,14 +20,14 @@ import pandas as pd
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.omanta_3rd.jobs.monthly_run import StrategyParams, build_features
+from src.omanta_3rd.jobs.longterm_run import StrategyParams, build_features
 from src.omanta_3rd.jobs.optimize import (
     EntryScoreParams,
     _calculate_entry_score_with_params,
     _select_portfolio_with_params,
     _entry_score_with_params,
 )
-from src.omanta_3rd.jobs.batch_monthly_run import get_monthly_rebalance_dates
+from src.omanta_3rd.jobs.batch_longterm_run import get_monthly_rebalance_dates
 from src.omanta_3rd.backtest.timeseries import calculate_timeseries_returns_from_portfolios
 from src.omanta_3rd.backtest.eval_common import calculate_metrics_from_timeseries_data
 from src.omanta_3rd.backtest.feature_cache import FeatureCache

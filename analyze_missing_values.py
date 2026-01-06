@@ -1,6 +1,6 @@
 """Coreスコアの欠損値分析スクリプト"""
 
-from src.omanta_3rd.jobs.monthly_run import build_features
+from src.omanta_3rd.jobs.longterm_run import build_features
 from src.omanta_3rd.infra.db import connect_db
 import pandas as pd
 import numpy as np

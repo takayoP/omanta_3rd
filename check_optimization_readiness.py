@@ -20,10 +20,10 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.omanta_3rd.infra.db import connect_db
-from src.omanta_3rd.jobs.batch_monthly_run import get_monthly_rebalance_dates
-from src.omanta_3rd.jobs.monthly_run import build_features, _load_universe, _snap_listed_date
+from src.omanta_3rd.jobs.batch_longterm_run import get_monthly_rebalance_dates
+from src.omanta_3rd.jobs.longterm_run import build_features, _load_universe, _snap_listed_date
 from src.omanta_3rd.jobs.optimize_timeseries import run_backtest_for_optimization_timeseries
-from src.omanta_3rd.jobs.monthly_run import StrategyParams
+from src.omanta_3rd.jobs.longterm_run import StrategyParams
 from src.omanta_3rd.jobs.optimize import EntryScoreParams
 from dataclasses import replace
 

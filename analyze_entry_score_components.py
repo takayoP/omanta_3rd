@@ -16,7 +16,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from omanta_3rd.infra.db import connect_db
 from omanta_3rd.backtest.feature_cache import FeatureCache
-from omanta_3rd.jobs.monthly_run import _rsi_from_series, _bb_zscore
+from omanta_3rd.jobs.longterm_run import _rsi_from_series, _bb_zscore
 
 def get_future_return(conn, code: str, rebalance_date: str, horizon_months: int) -> float:
     """指定されたリバランス日からhorizon_months後のリターンを取得"""
@@ -106,9 +106,9 @@ def calculate_entry_score_components(conn, code: str, as_of_date: str, params=No
     prices_df = prices_df.sort_values('date')
     close_series = prices_df['adj_close']
     
-    # デフォルトパラメータ（monthly_run.pyのPARAMSから）
+    # デフォルトパラメータ（longterm_run.pyのPARAMSから）
     if params is None:
-        from omanta_3rd.jobs.monthly_run import PARAMS
+        from omanta_3rd.jobs.longterm_run import PARAMS
         rsi_base = PARAMS.rsi_base
         rsi_max = PARAMS.rsi_max
         bb_z_base = PARAMS.bb_z_base

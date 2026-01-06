@@ -27,9 +27,9 @@ from .optimize_timeseries import (
     objective_timeseries,
     _setup_blas_threads,
 )
-from ..jobs.monthly_run import StrategyParams
+from ..jobs.longterm_run import StrategyParams
 from ..jobs.optimize import EntryScoreParams
-from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
+from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..backtest.feature_cache import FeatureCache
 
 

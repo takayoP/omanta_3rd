@@ -31,14 +31,14 @@ from optuna.trial import TrialState
 from optuna.visualization import plot_optimization_history, plot_param_importances
 
 from ..infra.db import connect_db
-from ..jobs.monthly_run import (
+from ..jobs.longterm_run import (
     StrategyParams,
     build_features,
     select_portfolio,
     save_features,
     save_portfolio,
 )
-from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
+from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..backtest.feature_cache import FeatureCache
 from ..backtest.performance import calculate_portfolio_performance
 from ..jobs.optimize import (

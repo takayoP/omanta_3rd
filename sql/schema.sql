@@ -300,9 +300,9 @@ CREATE TABLE IF NOT EXISTS index_daily (
   PRIMARY KEY (date, index_code)
 );
 -- -----------------------
--- 12) monthly_rebalance_final_selected_candidates : 月次リバランス型 最終選定候補（基本情報とパラメータ）
+-- 12) strategy_params_monthly_rebalance : 月次リバランス型 最終選定候補（基本情報とパラメータ）
 -- -----------------------
-CREATE TABLE IF NOT EXISTS monthly_rebalance_final_selected_candidates (
+CREATE TABLE IF NOT EXISTS strategy_params_monthly_rebalance (
   trial_number INTEGER PRIMARY KEY,
   cluster INTEGER,
   train_sharpe REAL,
@@ -324,8 +324,12 @@ CREATE TABLE IF NOT EXISTS monthly_rebalance_final_selected_candidates (
   bb_z_max REAL,
   -- メタデータ
   created_at TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  -- JSONファイルの保存先パス
+  json_file_path TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_strategy_params_monthly_rebalance_json_file 
+  ON strategy_params_monthly_rebalance(json_file_path);
 -- -----------------------
 -- 13) monthly_rebalance_candidate_performance : 月次リバランス型 最終選定候補のパフォーマンス指標
 -- -----------------------
@@ -356,7 +360,7 @@ CREATE TABLE IF NOT EXISTS monthly_rebalance_candidate_performance (
   sharpe_after_cost_2025 REAL,
   -- メタデータ
   created_at TEXT,
-  FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number)
+  FOREIGN KEY (trial_number) REFERENCES strategy_params_monthly_rebalance(trial_number)
 );
 CREATE INDEX IF NOT EXISTS idx_monthly_rebalance_performance_trial 
   ON monthly_rebalance_candidate_performance(trial_number);
@@ -373,7 +377,7 @@ CREATE TABLE IF NOT EXISTS monthly_rebalance_candidate_monthly_returns (
   excess_return REAL,
   -- 月次超過リターン（小数、例: 0.05 = 5%）
   created_at TEXT,
-  FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number),
+  FOREIGN KEY (trial_number) REFERENCES strategy_params_monthly_rebalance(trial_number),
   UNIQUE(trial_number, evaluation_period, period_date)
 );
 CREATE INDEX IF NOT EXISTS idx_monthly_rebalance_returns_trial_period 
@@ -423,7 +427,7 @@ CREATE TABLE IF NOT EXISTS monthly_rebalance_candidate_detailed_metrics (
   annual_cost_pct REAL,
   -- メタデータ
   created_at TEXT,
-  FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number),
+  FOREIGN KEY (trial_number) REFERENCES strategy_params_monthly_rebalance(trial_number),
   UNIQUE(trial_number, evaluation_period, cost_bps)
 );
 CREATE INDEX IF NOT EXISTS idx_monthly_rebalance_detailed_metrics_trial_period 

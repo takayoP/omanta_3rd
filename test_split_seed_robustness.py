@@ -26,7 +26,7 @@ from omanta_3rd.jobs.optimize_longterm import (
     get_monthly_rebalance_dates,
     EntryScoreParams,
 )
-from omanta_3rd.jobs.monthly_run import StrategyParams
+from omanta_3rd.jobs.longterm_run import StrategyParams
 from omanta_3rd.backtest.feature_cache import FeatureCache
 
 

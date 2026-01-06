@@ -24,7 +24,7 @@ def create_tables(conn: sqlite3.Connection):
     
     # 最終選定候補テーブル（基本情報とパラメータ）
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS monthly_rebalance_final_selected_candidates (
+        CREATE TABLE IF NOT EXISTS strategy_params_monthly_rebalance (
             trial_number INTEGER PRIMARY KEY,
             cluster INTEGER,
             train_sharpe REAL,
@@ -46,8 +46,25 @@ def create_tables(conn: sqlite3.Connection):
             bb_z_max REAL,
             -- メタデータ
             created_at TEXT,
-            updated_at TEXT
+            updated_at TEXT,
+            -- JSONファイルの保存先パス
+            json_file_path TEXT
         )
+    """)
+    
+    # json_file_pathカラムが存在しない場合は追加
+    cursor.execute("PRAGMA table_info(strategy_params_monthly_rebalance)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "json_file_path" not in columns:
+        cursor.execute("""
+            ALTER TABLE strategy_params_monthly_rebalance
+            ADD COLUMN json_file_path TEXT
+        """)
+    
+    # インデックス作成
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_strategy_params_monthly_rebalance_json_file
+        ON strategy_params_monthly_rebalance(json_file_path)
     """)
     
     # パフォーマンス指標テーブル
@@ -79,7 +96,7 @@ def create_tables(conn: sqlite3.Connection):
             sharpe_after_cost_2025 REAL,
             -- メタデータ
             created_at TEXT,
-            FOREIGN KEY (trial_number) REFERENCES monthly_rebalance_final_selected_candidates(trial_number)
+            FOREIGN KEY (trial_number) REFERENCES strategy_params_monthly_rebalance(trial_number)
         )
     """)
     
@@ -112,14 +129,17 @@ def insert_candidate(cursor: sqlite3.Cursor, trial_number: int, data: Dict[str, 
     
     now = datetime.now().isoformat()
     
+    # JSONファイルの絶対パスを取得
+    json_file_path = str(Path(CANDIDATES_JSON).absolute())
+    
     cursor.execute("""
-        INSERT OR REPLACE INTO final_selected_candidates (
+        INSERT OR REPLACE INTO strategy_params_monthly_rebalance (
             trial_number, cluster, train_sharpe, ranking, recommendation_text,
             w_quality, w_growth, w_record_high, w_size, w_value, w_forward_per,
             roe_min, bb_weight, liquidity_quantile_cut,
             rsi_base, rsi_max, bb_z_base, bb_z_max,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, updated_at, json_file_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         trial_number,
         None,  # cluster情報は候補JSONに含まれていない場合はNone
@@ -140,7 +160,8 @@ def insert_candidate(cursor: sqlite3.Cursor, trial_number: int, data: Dict[str, 
         params.get('bb_z_base'),
         params.get('bb_z_max'),
         now,
-        now
+        now,
+        json_file_path
     ))
 
 
@@ -235,7 +256,7 @@ def main():
         print("\n=== 保存されたデータの確認 ===")
         cursor.execute("""
             SELECT trial_number, ranking, recommendation_text 
-            FROM monthly_rebalance_final_selected_candidates 
+            FROM strategy_params_monthly_rebalance 
             ORDER BY ranking
         """)
         for row in cursor.fetchall():

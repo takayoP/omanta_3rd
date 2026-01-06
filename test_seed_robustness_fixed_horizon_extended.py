@@ -103,7 +103,7 @@ def test_seed_robustness_fixed_horizon_extended(
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import multiprocessing as mp
     from dataclasses import fields
-    from omanta_3rd.jobs.monthly_run import StrategyParams
+    from omanta_3rd.jobs.longterm_run import StrategyParams
     from omanta_3rd.jobs.optimize import EntryScoreParams
     
     # 並列数（デフォルト: CPU数、SQLite環境では制限）
@@ -296,7 +296,7 @@ def _process_single_seed_wrapper(
 ) -> tuple[int, Optional[float], Optional[Dict[str, Any]]]:
     """単一seedの処理をラップ（並列化用）"""
     try:
-        from omanta_3rd.jobs.monthly_run import StrategyParams
+        from omanta_3rd.jobs.longterm_run import StrategyParams
         from omanta_3rd.jobs.optimize import EntryScoreParams
         
         # dataclassを再構築

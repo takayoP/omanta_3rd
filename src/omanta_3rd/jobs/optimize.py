@@ -27,7 +27,7 @@ except ImportError:
     TKINTER_AVAILABLE = False
 
 from ..infra.db import connect_db
-from ..jobs.monthly_run import (
+from ..jobs.longterm_run import (
     StrategyParams,
     build_features,
     select_portfolio,
@@ -38,7 +38,7 @@ from ..backtest.performance import (
     calculate_portfolio_performance,
     save_performance_to_db,
 )
-from ..jobs.batch_monthly_run import get_monthly_rebalance_dates
+from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 
 
 @dataclass
@@ -69,7 +69,7 @@ def _entry_score_with_params(
     Returns:
         entry_score
     """
-    from ..jobs.monthly_run import _bb_zscore, _rsi_from_series
+    from ..jobs.longterm_run import _bb_zscore, _rsi_from_series
     
     scores = []
     for n in (20, 60, 90):
@@ -166,7 +166,7 @@ def _select_portfolio_with_params(
     Returns:
         選択されたポートフォリオ
     """
-    from ..jobs.monthly_run import (
+    from ..jobs.longterm_run import (
         _pct_rank,
         _log_safe,
         PARAMS as DEFAULT_PARAMS,
