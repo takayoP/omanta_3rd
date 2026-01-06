@@ -1,4 +1,4 @@
-﻿# Walk-Forward Analysis実行スクリプト（n_trials=100、24M/36M同時実行）
+# Walk-Forward Analysis実行スクリプト（n_trials=100、24M/36M同時実行）
 # 逆張り許可設計で24M/36Mのrollテストを同時に実行します（試行回数100）
 
 Write-Host ("=" * 80)

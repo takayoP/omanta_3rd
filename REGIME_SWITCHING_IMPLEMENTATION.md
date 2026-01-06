@@ -202,3 +202,11 @@ python -m omanta_3rd.jobs.optimize_timeseries --start 2020-01-01 --end 2024-12-3
 - ✅ B-1: 月次リバランス型の最適化にentry_modeを追加
 - ✅ B-2: mom候補とrev候補を別々に最適化してJSONに保存
 
+
+
+
+
+
+
+
+

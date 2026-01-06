@@ -190,3 +190,11 @@ python -c "import json; data = json.load(open('walk_forward_longterm_12M_roll_ev
 2. 固定パラメータ運用の候補を作成
 3. 横持ち評価を実施（各foldのbest_paramsを他foldに適用）
 
+
+
+
+
+
+
+
+

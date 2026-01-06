@@ -92,3 +92,11 @@ def get_registry_entry(params_id: str) -> Dict[str, Any]:
     
     return registry[params_id]
 
+
+
+
+
+
+
+
+

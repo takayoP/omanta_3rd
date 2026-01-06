@@ -12,3 +12,11 @@ print(f"2020-10-03は{weekday_names[d2.weekday()]}です（weekday={d2.weekday()
 
 
 
+
+
+
+
+
+
+
+

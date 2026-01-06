@@ -128,3 +128,11 @@ entry_scoreは以下の方法で計算されます：
 if __name__ == "__main__":
     verify_entry_score_usage()
 
+
+
+
+
+
+
+
+

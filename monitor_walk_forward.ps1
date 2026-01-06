@@ -1,4 +1,4 @@
-﻿# monitor_walk_forward.ps1
+# monitor_walk_forward.ps1
 # Run: .\monitor_walk_forward.ps1
 # Stop: Ctrl+C
 

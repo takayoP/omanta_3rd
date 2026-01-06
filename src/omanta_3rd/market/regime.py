@@ -129,3 +129,11 @@ def get_market_regime(
         "slope200_20": float(slope200_20),
     }
 
+
+
+
+
+
+
+
+

@@ -82,3 +82,11 @@ python -m omanta_3rd.jobs.batch_longterm_run_with_regime --start 2020-01-01 --en
 - すべてのインポート文を更新済みです
 - 既存のコードとの互換性はありません（インポートエラーが発生します）が、すべて更新済みです
 
+
+
+
+
+
+
+
+

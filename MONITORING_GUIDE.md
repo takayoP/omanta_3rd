@@ -147,3 +147,11 @@ python monitor_walk_forward.py > monitor.log 2>&1
 ```
 
 
+
+
+
+
+
+
+
+

@@ -96,3 +96,11 @@ $ python -c "from src.omanta_3rd.jobs.params_utils import normalize_params; para
 
 レジーム切替機能が完全に動作するようになりました。パラメータは各リバランス日で動的に切り替わり、実際のポートフォリオ作成に反映されます。
 
+
+
+
+
+
+
+
+

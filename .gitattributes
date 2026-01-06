@@ -1,0 +1,35 @@
+# デフォルトでテキストファイルを自動判定
+* text=auto
+
+# 明示的にLFに統一するファイルタイプ
+*.py text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.txt text eol=lf
+*.toml text eol=lf
+*.mm text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=lf
+*.sh text eol=lf
+
+# バイナリファイル
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.db binary
+*.so binary
+*.pyc binary
+*.pyo binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.tar binary
+*.gz binary
+
+
+
