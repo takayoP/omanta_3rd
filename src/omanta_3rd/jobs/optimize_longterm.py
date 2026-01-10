@@ -774,8 +774,11 @@ def objective_longterm(
     n_periods = perf.get("n_periods", 0)  # P10算出に使ったサンプル数（ChatGPT推奨）
     
     # サンプル数が少ない場合は警告（P10の信頼性が低い可能性がある）
-    if n_periods < 12:  # 12Mなら12、24Mなら10等の閾値は将来調整可能
-        print(f"      [objective_longterm] ⚠️  警告: n_periods={n_periods}が少ないため、P10の信頼性が低い可能性があります")
+    # 注意: horizon_monthsに応じて閾値を調整する必要がある（12Mなら20、24Mなら10等）
+    min_periods_threshold = 20 if horizon_months <= 12 else 10  # 12Mなら20、24Mなら10
+    if n_periods < min_periods_threshold:
+        print(f"      [objective_longterm] ⚠️  警告: n_periods={n_periods}が少ないため、P10の信頼性が低い可能性があります（閾値: {min_periods_threshold}）")
+        # 注意: trialを無効にする（-infを返す）修正も検討可能だが、現状は警告のみ
     
     # 下振れ罰: P10が負の場合はペナルティ、正の場合はボーナス（係数λ）
     downside_penalty = lambda_penalty * min(0.0, p10_excess)  # P10が負の場合のみペナルティ
