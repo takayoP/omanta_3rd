@@ -93,10 +93,20 @@ def save_params_file(
     normalized_params = result_data["normalized_params"]
     test_perf = result_data["test_performance"]
     
+    # 元のparams_idを取得（lambdaを含まない形式、例: operational_24M_lambda0.05 -> operational_24M）
+    base_params_id = params_id
+    if "_lambda" in params_id:
+        base_params_id = params_id.split("_lambda")[0]
+    
     params_data = {
+        "params_id": params_id,  # フルパラメータID（lambdaを含む形式）
+        "base_params_id": base_params_id,  # 元のparams_id（registryに登録されている形式）
+        "horizon_months": horizon_months,  # トップレベルにも保存（後方互換性のため）
         "metadata": {
+            "params_id": params_id,  # metadataにも保存
+            "base_params_id": base_params_id,  # 元のparams_idも保存
             "horizon_months": horizon_months,
-            "strategy_type": "operational" if params_id == "operational_24M" else "research",
+            "strategy_type": "operational" if "operational_24M" in base_params_id else "research",
             "strategy_mode": strategy_mode,
             "source_fold": "reoptimized",
             "source_test_period": f"{result_data['start_date']} to {result_data['end_date']}",
@@ -107,7 +117,7 @@ def save_params_file(
             },
             "description": f"{horizon_months}Mホライズン・{strategy_mode}モード。require_full_horizon=Trueで再最適化。",
             "created_at": datetime.now().isoformat(),
-            "recommended_for": "operational_use" if params_id == "operational_24M" else "regime_switching",
+            "recommended_for": "operational_use" if "operational_24M" in base_params_id else "regime_switching",
             "version": version,
         },
         "params": {

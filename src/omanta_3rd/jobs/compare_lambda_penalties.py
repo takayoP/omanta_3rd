@@ -119,15 +119,99 @@ def run_backtest_with_params_file(
     with open(params_file_path, 'r', encoding='utf-8') as f:
         params_data = json.load(f)
     
-    params_id = params_data.get("params_id")
-    horizon_months = params_data.get("horizon_months")
+    # metadataからparams_idとhorizon_monthsを取得（新しい形式）
+    metadata = params_data.get("metadata", {})
+    params_id = metadata.get("params_id") or params_data.get("params_id")  # 後方互換性のため両方をチェック
+    base_params_id = metadata.get("base_params_id") or params_data.get("base_params_id")  # 元のparams_id
+    horizon_months = metadata.get("horizon_months") or params_data.get("horizon_months")  # 後方互換性のため両方をチェック
     
-    if not params_id or not horizon_months:
-        return {"error": "params_idまたはhorizon_monthsがパラメータファイルに見つかりません"}
+    if not horizon_months:
+        return {"error": "horizon_monthsがパラメータファイルに見つかりません"}
     
-    # パラメータを読み込む
-    params_dict = load_params_by_id_longterm(params_id)
-    strategy_params, entry_params = normalize_params(params_dict)
+    # params_idがない場合は、ファイル名から推測を試みる
+    # 注意: ファイル名は params_operational_24M_lambda0.05_20260110.json のような形式
+    if not params_id:
+        filename = params_file_path.stem
+        # lambda の部分を除去して元のparams_idを推測
+        if "_lambda" in filename:
+            params_id_from_file = filename.split("_lambda")[0].replace("params_", "")
+        else:
+            params_id_from_file = filename.replace("params_", "").split("_")[0]
+        
+        if "operational_24M" in params_id_from_file:
+            base_params_id = "operational_24M"
+            params_id = params_id_from_file
+        elif "12M_momentum" in params_id_from_file:
+            base_params_id = "12M_momentum"
+            params_id = params_id_from_file
+        elif "12M_reversal" in params_id_from_file:
+            base_params_id = "12M_reversal"
+            params_id = params_id_from_file
+        else:
+            # ファイル名から直接推測を試みる（最後の手段）
+            if "operational_24M" in filename:
+                base_params_id = "operational_24M"
+                params_id = "operational_24M"
+            elif "12M_momentum" in filename:
+                base_params_id = "12M_momentum"
+                params_id = "12M_momentum"
+            elif "12M_reversal" in filename:
+                base_params_id = "12M_reversal"
+                params_id = "12M_reversal"
+            else:
+                return {"error": f"params_idがパラメータファイルに見つかりません（ファイル名: {filename}）"}
+    
+    # base_params_idがない場合は、params_idから推測
+    if not base_params_id:
+        if "_lambda" in params_id:
+            base_params_id_candidate = params_id.split("_lambda")[0]
+            # 元のparams_idに変換
+            if "operational_24M" in base_params_id_candidate:
+                base_params_id = "operational_24M"
+            elif "12M_momentum" in base_params_id_candidate:
+                base_params_id = "12M_momentum"
+            elif "12M_reversal" in base_params_id_candidate:
+                base_params_id = "12M_reversal"
+            else:
+                base_params_id = base_params_id_candidate
+        else:
+            base_params_id = params_id
+    
+    # パラメータファイルから直接パラメータを読み込む（最適化されたパラメータを使用）
+    # 注意: registryには lambda を含まない元のparams_idが登録されているが、
+    #       最適化されたパラメータはパラメータファイルに保存されているため、パラメータファイルから読み込む
+    params = params_data.get("params", {})
+    if not params:
+        return {"error": "パラメータがパラメータファイルに見つかりません"}
+    
+    # StrategyParamsとEntryScoreParamsを構築（パラメータファイルから直接読み込む）
+    from ..jobs.longterm_run import StrategyParams
+    from ..jobs.optimize import EntryScoreParams
+    
+    strategy_params = StrategyParams(
+        target_min=12,
+        target_max=12,
+        w_quality=params.get("w_quality", 0.0),
+        w_value=params.get("w_value", 0.0),
+        w_growth=params.get("w_growth", 0.0),
+        w_record_high=params.get("w_record_high", 0.0),
+        w_size=params.get("w_size", 0.0),
+        w_forward_per=params.get("w_forward_per", 0.0),
+        w_pbr=params.get("w_pbr", 0.0),
+        roe_min=params.get("roe_min", 0.0),
+        liquidity_quantile_cut=params.get("liquidity_quantile_cut", 0.1),
+    )
+    
+    entry_params = EntryScoreParams(
+        rsi_base=params.get("rsi_base", 50.0),
+        rsi_max=params.get("rsi_max", 70.0),
+        bb_z_base=params.get("bb_z_base", 0.0),
+        bb_z_max=params.get("bb_z_max", 1.0),
+        bb_weight=params.get("bb_weight", 0.5),
+        rsi_weight=1.0 - params.get("bb_weight", 0.5),
+        rsi_min_width=params.get("rsi_min_width", 20.0),
+        bb_z_min_width=params.get("bb_z_min_width", 1.0),
+    )
     
     # リバランス日を取得（固定ホライズン評価）
     if rebalance_dates is None:
@@ -145,18 +229,39 @@ def run_backtest_with_params_file(
         if not require_full_horizon or eval_end_dt <= as_of_dt:
             valid_dates.append(rebalance_date)
     
-    # 各リバランス日でポートフォリオを作成
+    # パラメータファイルから直接読み込んだパラメータを使用してポートフォリオを作成
+    from ..jobs.longterm_run import build_features, select_portfolio
+    from ..infra.db import connect_db
+    
+    # 各リバランス日でポートフォリオを作成（パラメータファイルから直接読み込んだパラメータを使用）
     performances = []
     for rebalance_date in valid_dates:
-        result = run_monthly_portfolio_with_regime(
-            rebalance_date,
-            fixed_params_id=params_id,
-            calculate_performance=False,
-            as_of_date=as_of_date,
-            save_log=False,
-            save_to_db=False,
-            allowed_params_ids=None,
-        )
+        try:
+            with connect_db() as conn:
+                # 特徴量を構築
+                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
+                
+                if feat.empty:
+                    print(f"      [run_backtest_with_params_file] ⚠️  {rebalance_date}: 特徴量が空です")
+                    continue
+                
+                # ポートフォリオを選択
+                portfolio = select_portfolio(feat, strategy_params=strategy_params)
+                
+                if portfolio.empty:
+                    print(f"      [run_backtest_with_params_file] ⚠️  {rebalance_date}: ポートフォリオが空です")
+                    continue
+                
+                result = {
+                    "portfolio_created": True,
+                    "portfolio": portfolio,
+                    "horizon_months": horizon_months,
+                }
+        except Exception as e:
+            print(f"      [run_backtest_with_params_file] ❌ {rebalance_date}: エラー - {e}")
+            import traceback
+            traceback.print_exc()
+            continue
         
         if not result.get("portfolio_created") or "portfolio" not in result:
             continue
