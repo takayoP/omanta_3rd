@@ -23,6 +23,7 @@ import sys
 import random
 from dataclasses import dataclass, replace, fields
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 from typing import Dict, List, Optional, Tuple, Any, Literal
 import numpy as np
 import pandas as pd
@@ -37,6 +38,7 @@ from ..jobs.longterm_run import (
     select_portfolio,
     save_features,
     save_portfolio,
+    _snap_price_date,
 )
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..backtest.feature_cache import FeatureCache
@@ -59,14 +61,26 @@ def split_rebalance_dates(
     rebalance_dates: List[str],
     train_ratio: float = 0.8,
     random_seed: Optional[int] = 42,
+    time_series_split: bool = True,
+    train_end_date: Optional[str] = None,
+    horizon_months: Optional[int] = None,
+    require_full_horizon: bool = True,
 ) -> Tuple[List[str], List[str]]:
     """
-    リバランス日をランダムに学習/テストに分割
+    リバランス日を学習/テストに分割（固定ホライズン評価対応）
     
     Args:
         rebalance_dates: リバランス日のリスト
         train_ratio: 学習データの割合（デフォルト: 0.8、0.0 < train_ratio < 1.0）
-        random_seed: ランダムシード（Noneの場合は非再現、デフォルト: 42で再現可能）
+                     train_end_dateが指定されている場合は無視される
+        random_seed: ランダムシード（time_series_split=Falseの場合のみ使用）
+        time_series_split: Trueの場合は時系列分割、Falseの場合はランダム分割（デフォルト: True）
+                          **重要**: 運用候補を決める用途では時系列分割を推奨
+        train_end_date: 学習期間の終了日（YYYY-MM-DD、Noneの場合はtrain_ratioを使用）
+                       **重要**: 時系列リーク対策のため、明示的に指定することを推奨
+        horizon_months: 投資ホライズン（月数、Noneの場合は固定ホライズン制約を適用しない）
+        require_full_horizon: 固定ホライズン制約を適用するか（デフォルト: True）
+                             Trueの場合、train期間では`eval_end <= train_end_date`を満たすものだけを使用
     
     Returns:
         (train_dates, test_dates) のタプル
@@ -75,32 +89,75 @@ def split_rebalance_dates(
         ValueError: train_ratioが範囲外、またはrebalance_datesが2未満の場合
     """
     # バリデーション
-    if not 0.0 < train_ratio < 1.0:
+    if train_end_date is None and not 0.0 < train_ratio < 1.0:
         raise ValueError(f"train_ratio must be in (0, 1), got {train_ratio}")
     if len(rebalance_dates) < 2:
         raise ValueError(f"rebalance_dates must have at least 2 dates, got {len(rebalance_dates)}")
     
     # 重複を除去（念のため）
-    unique_dates = list(dict.fromkeys(rebalance_dates))  # 順序を保持しつつ重複除去
+    unique_dates = sorted(list(dict.fromkeys(rebalance_dates)))  # 時系列順にソート
+    
     if len(unique_dates) < 2:
         raise ValueError(f"After removing duplicates, rebalance_dates must have at least 2 dates, got {len(unique_dates)}")
     
-    shuffled = unique_dates.copy()
-    
-    # 副作用のないローカルRNGを使用（グローバル乱数状態を汚さない）
-    if random_seed is not None:
-        rng = random.Random(random_seed)
+    if time_series_split:
+        # 時系列分割（未来参照リーク対策）
+        if train_end_date is not None:
+            # train_end_dateが指定されている場合、その日付以前を学習期間とする
+            candidate_train_dates = [d for d in unique_dates if d <= train_end_date]
+            test_dates = [d for d in unique_dates if d > train_end_date]
+            
+            # 固定ホライズン制約を適用（train期間では`eval_end <= train_end_date`を満たすものだけを使用）
+            if require_full_horizon and horizon_months is not None:
+                train_end_dt = datetime.strptime(train_end_date, "%Y-%m-%d")
+                train_dates = []
+                for rebalance_date in candidate_train_dates:
+                    rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
+                    eval_end_dt = rebalance_dt + relativedelta(months=horizon_months)
+                    if eval_end_dt <= train_end_dt:
+                        train_dates.append(rebalance_date)
+            else:
+                train_dates = candidate_train_dates
+            
+            # バリデーション
+            if len(train_dates) < 1:
+                if require_full_horizon and horizon_months is not None:
+                    raise ValueError(
+                        f"No train dates found with eval_end <= {train_end_date} "
+                        f"(horizon_months={horizon_months}, require_full_horizon=True)"
+                    )
+                else:
+                    raise ValueError(f"No train dates found before or on {train_end_date}")
+            if len(test_dates) < 1:
+                raise ValueError(f"No test dates found after {train_end_date}")
+        else:
+            # train_ratioを使用（固定ホライズン制約は適用しない）
+            n_train = int(round(len(unique_dates) * train_ratio))
+            n_train = max(1, min(len(unique_dates) - 1, n_train))  # 1 <= n_train <= len-1
+            
+            train_dates = unique_dates[:n_train]
+            test_dates = unique_dates[n_train:]
     else:
-        rng = random.Random()  # OS乱数を使用（非再現）
-    rng.shuffle(shuffled)
-    
-    # 学習/テストに分割（roundを使用して80/20に近づける）
-    # ただし、train/test両方が最低1つになるようにクリップ
-    n_train = int(round(len(shuffled) * train_ratio))
-    n_train = max(1, min(len(shuffled) - 1, n_train))  # 1 <= n_train <= len-1
-    
-    train_dates = sorted(shuffled[:n_train])
-    test_dates = sorted(shuffled[n_train:])
+        # ランダム分割（研究用途のみ）
+        # train_end_dateはランダム分割では使用できない
+        if train_end_date is not None:
+            raise ValueError("train_end_date cannot be used with time_series_split=False")
+        
+        shuffled = unique_dates.copy()
+        
+        # 副作用のないローカルRNGを使用（グローバル乱数状態を汚さない）
+        if random_seed is not None:
+            rng = random.Random(random_seed)
+        else:
+            rng = random.Random()  # OS乱数を使用（非再現）
+        rng.shuffle(shuffled)
+        
+        # 学習/テストに分割
+        n_train = int(round(len(shuffled) * train_ratio))
+        n_train = max(1, min(len(shuffled) - 1, n_train))  # 1 <= n_train <= len-1
+        
+        train_dates = sorted(shuffled[:n_train])
+        test_dates = sorted(shuffled[n_train:])
     
     return train_dates, test_dates
 
@@ -113,9 +170,12 @@ def calculate_longterm_performance(
     n_jobs: int = -1,
     features_dict: Optional[Dict[str, pd.DataFrame]] = None,
     prices_dict: Optional[Dict[str, Dict[str, List[float]]]] = None,
+    horizon_months: Optional[int] = None,
+    require_full_horizon: bool = True,
+    as_of_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    長期保有型のパフォーマンスを計算
+    長期保有型のパフォーマンスを計算（固定ホライズン評価）
     
     Args:
         rebalance_dates: リバランス日のリスト
@@ -125,6 +185,11 @@ def calculate_longterm_performance(
         n_jobs: 並列実行数（-1でCPU数）
         features_dict: 特徴量辞書（{rebalance_date: features_df}）
         prices_dict: 価格データ辞書（{rebalance_date: {code: [adj_close, ...]}}）
+        horizon_months: 投資ホライズン（月数、必須）
+        require_full_horizon: ホライズン未達の期間を除外するか（デフォルト: True）
+        as_of_date: 評価の打ち切り日（YYYY-MM-DD、必須）
+                    **重要**: 未来参照リークを防ぐため、必ず明示的に指定してください（例: end_dateを渡す）
+                    Noneの場合はエラーを発生させます（DB MAX(date)は使用しません）
     
     Returns:
         パフォーマンス指標の辞書
@@ -214,16 +279,30 @@ def calculate_longterm_performance(
     print(f"      [calculate_longterm_performance] パフォーマンス計算開始...")
     sys.stdout.flush()
     performances = []
+    skipped_count = 0
+    skipped_reasons = {}
+    
     with connect_db() as conn:
-        # 最新の評価日を取得
-        latest_date_df = pd.read_sql_query(
-            "SELECT MAX(date) as max_date FROM prices_daily",
-            conn
-        )
-        latest_date = latest_date_df["max_date"].iloc[0] if not latest_date_df.empty else None
+        # 評価の打ち切り日を決定（必須）
+        if as_of_date is None:
+            raise ValueError(
+                "as_of_dateは必須です。未来参照リークを防ぐため、"
+                "必ず明示的に指定してください（例: end_dateを渡す）。"
+            )
+        print(f"      [calculate_longterm_performance] 評価の打ち切り日: {as_of_date}")
         
-        if latest_date is None:
-            raise RuntimeError("No price data available")
+        # 価格データの物理的な切り取り（未来参照リーク対策）
+        # prices_dailyをas_of_dateで切る（SQL取得段階でWHERE date <= as_of_dateを強制）
+        # 注意: この時点ではまだ価格データを取得していないが、
+        # calculate_portfolio_performance内で取得する際にas_of_dateを考慮する必要がある
+        
+        as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+        
+        # horizon_monthsは必須
+        if horizon_months is None:
+            raise ValueError("horizon_monthsは必須です。未来参照リークを防ぐため、明示的に指定してください。")
+        
+        # 評価日を決定（固定ホライズン評価）
         
         for rebalance_date in sorted(portfolios.keys()):
             # ポートフォリオをDBに一時保存（calculate_portfolio_performanceがDBから読み込むため）
@@ -232,19 +311,58 @@ def calculate_longterm_performance(
             # デバッグ: ポートフォリオの銘柄数を確認
             if len(portfolio_df) == 0:
                 print(f"警告: {rebalance_date}のポートフォリオが空です")
+                skipped_count += 1
+                skipped_reasons["空ポートフォリオ"] = skipped_reasons.get("空ポートフォリオ", 0) + 1
                 continue
+            
+            # 評価終了日を計算（固定ホライズン）
+            rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
+            eval_end_dt = rebalance_dt + relativedelta(months=horizon_months)
+            eval_end_date = eval_end_dt.strftime("%Y-%m-%d")
+            
+            # require_full_horizonがTrueの場合、eval_end_dateがas_of_dateより後の場合は除外
+            if require_full_horizon:
+                if eval_end_dt > as_of_dt:
+                    skipped_count += 1
+                    skipped_reasons["ホライズン未達"] = skipped_reasons.get("ホライズン未達", 0) + 1
+                    if skipped_reasons["ホライズン未達"] <= 5:  # 最初の5件だけ詳細ログ
+                        print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}はホライズン未達（{horizon_months}M、eval_end={eval_end_date} > as_of={as_of_date}）のため除外")
+                    continue
+            
+            # eval_end_dateとas_of_dateのうち、早い方を使用（安全のため）
+            eval_date = min(eval_end_date, as_of_date)
+            
+            # eval_dateを営業日にスナップ（非営業日の場合は前営業日を使用）
+            # 規約: eval_dateが非営業日の場合は、その日以前の最新の営業日を使用
+            try:
+                eval_date_snapped = _snap_price_date(conn, eval_date)
+                if eval_date_snapped != eval_date:
+                    print(f"      [calculate_longterm_performance] eval_dateを営業日にスナップ: {eval_date} → {eval_date_snapped}")
+                eval_date = eval_date_snapped
+            except RuntimeError as e:
+                skipped_count += 1
+                skipped_reasons["営業日スナップ失敗"] = skipped_reasons.get("営業日スナップ失敗", 0) + 1
+                print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}のeval_date({eval_date})以前に営業日が見つかりません: {e}")
+                continue
+            
+            # ログ出力（未来参照リーク確認用）
+            holding_years = (datetime.strptime(eval_date, "%Y-%m-%d") - rebalance_dt).days / 365.25
+            print(f"      [calculate_longterm_performance] {rebalance_date} → eval_end={eval_date} (holding={holding_years:.2f}年, horizon={horizon_months}M)")
             
             save_portfolio(conn, portfolio_df)
             # 重要: 別の接続から読み込む前にコミットが必要
             conn.commit()
             
             # パフォーマンスを計算
-            perf = calculate_portfolio_performance(rebalance_date, latest_date)
+            perf = calculate_portfolio_performance(rebalance_date, eval_date)
             if "error" not in perf:
                 performances.append(perf)
             else:
                 # エラーが発生した場合は警告を出力
-                print(f"警告: {rebalance_date}のパフォーマンス計算でエラーが発生しました: {perf.get('error', 'Unknown error')}")
+                skipped_count += 1
+                error_msg = perf.get('error', 'Unknown error')
+                skipped_reasons[f"計算エラー: {error_msg}"] = skipped_reasons.get(f"計算エラー: {error_msg}", 0) + 1
+                print(f"警告: {rebalance_date}のパフォーマンス計算でエラーが発生しました: {error_msg}")
             
             # 最適化中は一時的なポートフォリオなので削除（クリーンアップ）
             # 注意: 本番運用時は削除しない
@@ -253,9 +371,25 @@ def calculate_longterm_performance(
                 (rebalance_date,)
             )
             conn.commit()
+        
+        # 集計情報を出力
+        total_portfolios = len(portfolios)
+        evaluated_portfolios = len(performances)
+        print(f"      [calculate_longterm_performance] ポートフォリオ評価集計:")
+        print(f"        総ポートフォリオ数: {total_portfolios}")
+        print(f"        評価成功: {evaluated_portfolios}")
+        print(f"        スキップ: {skipped_count}")
+        if skipped_reasons:
+            print(f"        スキップ理由内訳:")
+            for reason, count in skipped_reasons.items():
+                print(f"          - {reason}: {count}件")
     
     if not performances:
-        raise RuntimeError("No performances were calculated")
+        raise RuntimeError(
+            f"No performances were calculated. "
+            f"Total portfolios: {len(portfolios)}, Skipped: {skipped_count}, "
+            f"Reasons: {skipped_reasons}"
+        )
     
     # 集計指標を計算
     # 改善: 各ポートフォリオをその保有期間で個別に年率化してから集計
@@ -276,10 +410,10 @@ def calculate_longterm_performance(
         
         # total_return_pctがNoneまたはNaNの場合はスキップ（品質が低いポートフォリオ）
         if rebalance_date and total_return_pct is not None and not pd.isna(total_return_pct):
-            # 保有期間を計算
+            # 保有期間を計算（eval_dateを使用）
             rebalance_dt = dt.strptime(rebalance_date, "%Y-%m-%d")
-            latest_dt = dt.strptime(latest_date, "%Y-%m-%d")
-            holding_years = (latest_dt - rebalance_dt).days / 365.25
+            eval_dt = dt.strptime(perf.get("as_of_date", as_of_date), "%Y-%m-%d")
+            holding_years = (eval_dt - rebalance_dt).days / 365.25
             
             # 累積リターンが-100%未満の場合は年率化をスキップ（年率化で複素数が生成される）
             return_factor = 1 + total_return_pct / 100
@@ -345,7 +479,7 @@ def calculate_longterm_performance(
     # 全体期間での年率化（従来の方法、参考用）
     first_rebalance = min(portfolios.keys())
     start_dt = dt.strptime(first_rebalance, "%Y-%m-%d")
-    end_dt = dt.strptime(latest_date, "%Y-%m-%d")
+    end_dt = as_of_dt
     total_years = (end_dt - start_dt).days / 365.25
     if total_years > 0:
         overall_annual_return = (1 + cumulative_return / 100) ** (1 / total_years) - 1
@@ -362,10 +496,19 @@ def calculate_longterm_performance(
     # 平均保有期間
     mean_holding_years = np.mean(holding_periods) if holding_periods else 0.0
     
+    # 下振れ指標（P10、P25、min）を計算
+    p10_annual_excess_return = np.percentile(annual_excess_returns, 10.0) if annual_excess_returns else 0.0
+    p25_annual_excess_return = np.percentile(annual_excess_returns, 25.0) if annual_excess_returns else 0.0
+    min_annual_excess_return = np.min(annual_excess_returns) if annual_excess_returns else 0.0
+    
     result = {
         # 目的関数用（TOPIXに対する年率超過リターン）
         "mean_annual_excess_return_pct": mean_annual_excess_return,  # 各ポートフォリオの年率超過リターンの平均
         "median_annual_excess_return_pct": median_annual_excess_return,  # 中央値
+        # 下振れ指標（下振れ罰用）
+        "p10_annual_excess_return_pct": p10_annual_excess_return,  # 下位10%の平均超過リターン
+        "p25_annual_excess_return_pct": p25_annual_excess_return,  # 下位25%の平均超過リターン
+        "min_annual_excess_return_pct": min_annual_excess_return,  # 最小超過リターン
         # 参考指標: 年率リターン（TOPIX比較なし）
         "mean_annual_return_pct": mean_annual_return,  # 各ポートフォリオの年率リターンの平均
         "median_annual_return_pct": median_annual_return,  # 中央値
@@ -380,7 +523,8 @@ def calculate_longterm_performance(
         "mean_holding_years": mean_holding_years,
         "total_years": total_years,
         "first_rebalance": first_rebalance,
-        "last_date": latest_date,
+        "as_of_date": as_of_date,
+        "last_date": as_of_date,  # 後方互換性のため
     }
     
     return result
@@ -394,6 +538,10 @@ def objective_longterm(
     n_jobs: int = -1,
     features_dict: Optional[Dict[str, pd.DataFrame]] = None,
     prices_dict: Optional[Dict[str, Dict[str, List[float]]]] = None,
+    horizon_months: int = 24,
+    require_full_horizon: bool = True,
+    as_of_date: Optional[str] = None,
+    lambda_penalty: float = 0.0,
 ) -> float:
     """
     Optunaの目的関数（長期保有型）
@@ -407,6 +555,9 @@ def objective_longterm(
         n_jobs: 並列実行数（-1でCPU数）
         features_dict: 特徴量辞書（事前計算済み）
         prices_dict: 価格データ辞書（事前計算済み）
+        horizon_months: 投資ホライズン（月数、デフォルト: 24）
+        require_full_horizon: ホライズン未達の期間を除外するか（デフォルト: True）
+        as_of_date: 評価の打ち切り日（YYYY-MM-DD、Noneの場合はend_dateを使用）
     
     Returns:
         最適化対象の値（年率超過リターン、TOPIXに対する超過リターン）
@@ -586,17 +737,32 @@ def objective_longterm(
         n_jobs=n_jobs,
         features_dict=features_dict,
         prices_dict=prices_dict,
+        horizon_months=horizon_months,
+        require_full_horizon=require_full_horizon,
+        as_of_date=as_of_date,
     )
     print(f"    [objective_longterm] calculate_longterm_performance完了")
     sys.stdout.flush()
     
-    # 目的関数: 各ポートフォリオの年率超過リターンの平均（TOPIXに対する超過リターン）
-    objective_value = perf["mean_annual_excess_return_pct"]
+    # 目的関数: 各ポートフォリオの年率超過リターンの平均 - 下振れ罰
+    # 下振れ罰: P10超過リターン（下位10%の平均）を係数λでペナルティ
+    mean_excess = perf["mean_annual_excess_return_pct"]
+    p10_excess = perf.get("p10_annual_excess_return_pct", 0.0)  # 下位10%の平均超過リターン
+    min_excess = perf.get("min_annual_excess_return_pct", 0.0)  # 最小超過リターン
     
-    # デバッグ用ログ出力
+    # 下振れ罰: P10が負の場合はペナルティ、正の場合はボーナス（係数λ）
+    downside_penalty = lambda_penalty * min(0.0, p10_excess)  # P10が負の場合のみペナルティ
+    
+    # 目的関数: 平均超過 - 下振れ罰
+    objective_value = mean_excess + downside_penalty
+    
+    # デバッグ用ログ出力（下振れ指標を含む）
     log_msg = (
         f"[Trial {trial.number}] "
         f"objective={objective_value:.4f}%, "
+        f"mean_excess={mean_excess:.4f}%, "
+        f"p10_excess={p10_excess:.4f}%, "
+        f"downside_penalty={downside_penalty:.4f}%, "
         f"median_excess={perf['median_annual_excess_return_pct']:.4f}%, "
         f"median_return={perf['median_annual_return_pct']:.4f}%, "
         f"cumulative={perf['cumulative_return_pct']:.4f}%, "
@@ -623,6 +789,14 @@ def main(
     cache_dir: str = "cache/features",
     train_ratio: float = 0.8,
     random_seed: int = 42,
+    save_params: Optional[str] = None,
+    params_id: Optional[str] = None,
+    version: Optional[str] = None,
+        horizon_months: int = 24,
+        strategy_mode: Optional[Literal["momentum", "reversal"]] = None,
+        as_of_date: Optional[str] = None,
+        train_end_date: Optional[str] = None,
+        lambda_penalty: float = 0.0,
 ):
     """
     長期保有型の最適化を実行
@@ -639,11 +813,25 @@ def main(
         storage: Optunaストレージ（Noneの場合はSQLite）
         no_db_write: 最適化中にDBに書き込まない
         cache_dir: キャッシュディレクトリ
-        train_ratio: 学習データの割合（デフォルト: 0.8）
+        train_ratio: 学習データの割合（デフォルト: 0.8、train_end_dateが指定されている場合は無視される）
         random_seed: ランダムシード（デフォルト: 42）
+        save_params: パラメータファイルの保存パス（Noneの場合は保存しない）
+        params_id: パラメータID（レジストリ用、save_paramsが指定されている場合に必要）
+        version: バージョン（例: "v2", "v20260108"、Noneの場合は自動生成）
+        horizon_months: 投資ホライズン（月数、デフォルト: 24）
+        strategy_mode: 戦略モード（"momentum"または"reversal"、Noneの場合は自動判定）
+        as_of_date: 評価の打ち切り日（YYYY-MM-DD、Noneの場合はend_dateを使用）
+                    **重要**: 未来参照リークを防ぐため、end_dateをデフォルトとして使用
+        train_end_date: 学習期間の終了日（YYYY-MM-DD、Noneの場合はtrain_ratioを使用）
+                       **重要**: 時系列リーク対策のため、明示的に指定することを推奨
     """
     # BLASスレッドを1に設定
     _setup_blas_threads()
+    
+    # as_of_dateが指定されていない場合、end_dateを使用（DB MAX(date)は使わない）
+    if as_of_date is None:
+        as_of_date = end_date
+        print(f"      [optimize_longterm_main] as_of_dateが指定されていません。end_date({as_of_date})を使用します。")
     
     if study_type == "A":
         study_type_desc = "BB寄り・低ROE閾値"
@@ -656,9 +844,12 @@ def main(
     print(f"長期保有型パラメータ最適化システム（Study {study_type}: {study_type_desc}）")
     print("=" * 80)
     print(f"期間: {start_date} ～ {end_date}")
+    if train_end_date is not None:
+        print(f"学習期間終了日: {train_end_date}")
+    else:
+        print(f"学習/テスト分割: {train_ratio:.1%} / {1-train_ratio:.1%}")
     print(f"試行回数: {n_trials}")
     print(f"取引コスト: {cost_bps} bps")
-    print(f"学習/テスト分割: {train_ratio:.1%} / {1-train_ratio:.1%}")
     print(f"ランダムシード: {random_seed}")
     print("=" * 80)
     print()
@@ -674,12 +865,16 @@ def main(
         print("❌ リバランス日が見つかりませんでした")
         return
     
-    # 学習/テストに分割
+    # 学習/テストに分割（固定ホライズン評価対応）
     try:
         train_dates, test_dates = split_rebalance_dates(
             rebalance_dates,
             train_ratio=train_ratio,
             random_seed=random_seed,
+            time_series_split=True,  # 時系列分割（未来参照リーク対策）
+            train_end_date=train_end_date,
+            horizon_months=horizon_months,  # 固定ホライズン制約
+            require_full_horizon=True,  # train期間では`eval_end <= train_end_date`を満たすものだけを使用
         )
     except ValueError as e:
         print(f"❌ データ分割エラー: {e}")
@@ -780,6 +975,10 @@ def main(
         backtest_n_jobs,
         features_dict=features_dict,
         prices_dict=prices_dict,
+        horizon_months=horizon_months,
+        require_full_horizon=True,  # ホライズン未達の期間を除外
+        as_of_date=as_of_date,
+        lambda_penalty=lambda_penalty,
     )
     
     completed_trials = 0
@@ -842,9 +1041,23 @@ def main(
     bb_direction = best_trial.user_attrs.get("bb_direction", "不明")
     rsi_width = best_trial.user_attrs.get("rsi_width", None)
     bb_z_width = best_trial.user_attrs.get("bb_z_width", None)
+    
+    # パラメータの取得とフォーマット
+    rsi_base = best_trial.params.get('rsi_base', None)
+    rsi_max = best_trial.params.get('rsi_max', None)
+    bb_z_base = best_trial.params.get('bb_z_base', None)
+    bb_z_max = best_trial.params.get('bb_z_max', None)
+    
+    rsi_base_str = f"{rsi_base:.2f}" if rsi_base is not None else "N/A"
+    rsi_max_str = f"{rsi_max:.2f}" if rsi_max is not None else "N/A"
+    rsi_width_str = f"{rsi_width:.2f}" if rsi_width is not None else "N/A"
+    bb_z_base_str = f"{bb_z_base:.2f}" if bb_z_base is not None else "N/A"
+    bb_z_max_str = f"{bb_z_max:.2f}" if bb_z_max is not None else "N/A"
+    bb_z_width_str = f"{bb_z_width:.2f}" if bb_z_width is not None else "N/A"
+    
     print(f"entry_score方向:")
-    print(f"  RSI: {rsi_direction} (rsi_base={best_trial.params.get('rsi_base', 'N/A'):.2f}, rsi_max={best_trial.params.get('rsi_max', 'N/A'):.2f}, width={rsi_width:.2f if rsi_width else 'N/A'})")
-    print(f"  BB: {bb_direction} (bb_z_base={best_trial.params.get('bb_z_base', 'N/A'):.2f}, bb_z_max={best_trial.params.get('bb_z_max', 'N/A'):.2f}, width={bb_z_width:.2f if bb_z_width else 'N/A'})")
+    print(f"  RSI: {rsi_direction} (rsi_base={rsi_base_str}, rsi_max={rsi_max_str}, width={rsi_width_str})")
+    print(f"  BB: {bb_direction} (bb_z_base={bb_z_base_str}, bb_z_max={bb_z_max_str}, width={bb_z_width_str})")
     print()
     
     print("最良パラメータ:")
@@ -912,6 +1125,9 @@ def main(
         n_jobs=backtest_n_jobs,
         features_dict=features_dict,
         prices_dict=prices_dict,
+        horizon_months=horizon_months,
+        require_full_horizon=True,  # ホライズン未達の期間を除外
+        as_of_date=as_of_date,
     )
     
     print(f"テストデータ評価結果:")
@@ -1046,6 +1262,11 @@ if __name__ == "__main__":
     parser.add_argument("--cache-dir", type=str, default="cache/features", help="キャッシュディレクトリ")
     parser.add_argument("--train-ratio", type=float, default=0.8, help="学習データの割合（デフォルト: 0.8）")
     parser.add_argument("--random-seed", type=int, default=42, help="ランダムシード（デフォルト: 42）")
+    parser.add_argument("--lambda-penalty", type=float, default=0.0, help="下振れ罰の係数λ（デフォルト: 0.0）")
+    parser.add_argument("--horizon-months", type=int, default=24, help="投資ホライズン（月数、デフォルト: 24）")
+    parser.add_argument("--strategy-mode", type=str, choices=["momentum", "reversal"], default=None, help="戦略モード（Noneの場合は自動判定）")
+    parser.add_argument("--as-of-date", type=str, default=None, help="評価の打ち切り日（YYYY-MM-DD、Noneの場合はend_dateを使用）")
+    parser.add_argument("--train-end-date", type=str, default=None, help="学習期間の終了日（YYYY-MM-DD、Noneの場合はtrain_ratioを使用）")
     
     args = parser.parse_args()
     
@@ -1063,5 +1284,13 @@ if __name__ == "__main__":
         cache_dir=args.cache_dir,
         train_ratio=args.train_ratio,
         random_seed=args.random_seed,
+        save_params=args.save_params if hasattr(args, 'save_params') else None,
+        params_id=args.params_id if hasattr(args, 'params_id') else None,
+        version=args.version if hasattr(args, 'version') else None,
+        horizon_months=args.horizon_months,
+        strategy_mode=args.strategy_mode,
+        as_of_date=args.as_of_date,
+        train_end_date=args.train_end_date,
+        lambda_penalty=args.lambda_penalty,
     )
 
