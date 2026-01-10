@@ -501,16 +501,37 @@ def compare_regime_switching(
             eval_end_raw_str = eval_end_raw.strftime("%Y-%m-%d")
             
             # require_full_horizonがTrueの場合、eval_end <= as_of_dateを満たすかチェック
+            as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
             if require_full_horizon:
-                as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
                 if eval_end_raw > as_of_dt:
                     # ホライズン未達のためスキップ
                     continue
             
             # eval_endを営業日にスナップ（価格データが存在する最新の日付を取得）
             # ただし、as_of_dateを超えないようにする（未来遮断）
+            # 重要: スナップ関数の引数はeval_end_raw_strである必要がある（固定ホライズンを守るため）
             with connect_db() as conn:
                 eval_end_snapped = _snap_price_date(conn, min(eval_end_raw_str, as_of_date))
+                
+                # スナップ差分が大きい場合（データ欠損で数週間〜数ヶ月戻るケース）は除外（ChatGPT推奨）
+                eval_end_raw_dt = datetime.strptime(eval_end_raw_str, "%Y-%m-%d")
+                eval_end_snapped_dt = datetime.strptime(eval_end_snapped, "%Y-%m-%d")
+                snap_diff_days = (eval_end_raw_dt - eval_end_snapped_dt).days
+                
+                if snap_diff_days > 7:  # 1週間以上のズレは除外
+                    print(f"      [compare_regime_switching] ⚠️  {rebalance_date}のeval_endスナップ差分が大きい（{snap_diff_days}日）のため除外: {eval_end_raw_str} → {eval_end_snapped}")
+                    continue
+                
+                # require_full_horizon=Trueの場合は、固定ホライズン評価を保証するためのアサーション
+                if require_full_horizon:
+                    # require_full_horizon=Trueなら、eval_end_raw <= as_of_dateが保証されている
+                    # また、スナップ差分が小さい（7日以内）ことも確認済み
+                    assert eval_end_raw <= as_of_dt, (
+                        f"require_full_horizon=True but eval_end_raw({eval_end_raw_str}) > as_of_date({as_of_date}). "
+                        f"This should not happen if require_full_horizon check passed."
+                    )
+                    if snap_diff_days > 0:
+                        print(f"      [compare_regime_switching] eval_endを営業日にスナップ: {eval_end_raw_str} → {eval_end_snapped} (差分: {snap_diff_days}日)")
             
             # 評価終点はeval_end_snapped（ホライズン固定）を使用
             # as_of_dateは未来遮断のための上限としてのみ機能
@@ -641,6 +662,7 @@ def compare_regime_switching(
                 "p10_excess_return_pct": p10_excess_return,
                 "num_periods": len(returns),
                 "num_periods_included": len(annualized_returns),  # 実際に集計に含まれた期間数
+                "n_periods": len(annualized_excess_returns),  # P10算出に使ったサンプル数（ChatGPT推奨）
                 "performances": performances,
                 "params_id_summary": params_id_summary,  # レジーム切替戦略の場合のみ
             }

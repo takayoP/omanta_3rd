@@ -330,14 +330,35 @@ def calculate_longterm_performance(
                     continue
             
             # eval_end_dateとas_of_dateのうち、早い方を使用（安全のため）
+            # 注意: require_full_horizon=Trueなら実質eval_end_date（as_of_date >= eval_end_dateが保証されている）
             eval_date = min(eval_end_date, as_of_date)
+            
+            # require_full_horizon=Trueの場合は、固定ホライズン評価を保証するためのアサーション
+            if require_full_horizon:
+                assert eval_date == eval_end_date, (
+                    f"require_full_horizon=True but eval_date({eval_date}) != eval_end_date({eval_end_date}). "
+                    f"This should not happen if require_full_horizon check passed."
+                )
             
             # eval_dateを営業日にスナップ（非営業日の場合は前営業日を使用）
             # 規約: eval_dateが非営業日の場合は、その日以前の最新の営業日を使用
+            # 重要: スナップ関数の引数はeval_date（=eval_end_date）である必要がある（固定ホライズンを守るため）
             try:
                 eval_date_snapped = _snap_price_date(conn, eval_date)
+                
+                # スナップ差分が大きい場合（データ欠損で数週間〜数ヶ月戻るケース）は除外（ChatGPT推奨）
+                eval_dt = datetime.strptime(eval_date, "%Y-%m-%d")
+                eval_snapped_dt = datetime.strptime(eval_date_snapped, "%Y-%m-%d")
+                snap_diff_days = (eval_dt - eval_snapped_dt).days
+                
+                if snap_diff_days > 7:  # 1週間以上のズレは除外
+                    skipped_count += 1
+                    skipped_reasons[f"スナップ差分過大（{snap_diff_days}日）"] = skipped_reasons.get(f"スナップ差分過大（{snap_diff_days}日）", 0) + 1
+                    print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}のeval_dateスナップ差分が大きい（{snap_diff_days}日）のため除外: {eval_date} → {eval_date_snapped}")
+                    continue
+                
                 if eval_date_snapped != eval_date:
-                    print(f"      [calculate_longterm_performance] eval_dateを営業日にスナップ: {eval_date} → {eval_date_snapped}")
+                    print(f"      [calculate_longterm_performance] eval_dateを営業日にスナップ: {eval_date} → {eval_date_snapped} (差分: {snap_diff_days}日)")
                 eval_date = eval_date_snapped
             except RuntimeError as e:
                 skipped_count += 1
@@ -520,6 +541,7 @@ def calculate_longterm_performance(
         "win_rate": win_rate,
         "num_portfolios": len(portfolios),
         "num_performances": len(performances),
+        "n_periods": len(annual_excess_returns),  # P10算出に使ったサンプル数（ChatGPT推奨）
         "mean_holding_years": mean_holding_years,
         "total_years": total_years,
         "first_rebalance": first_rebalance,
@@ -749,6 +771,11 @@ def objective_longterm(
     mean_excess = perf["mean_annual_excess_return_pct"]
     p10_excess = perf.get("p10_annual_excess_return_pct", 0.0)  # 下位10%の平均超過リターン
     min_excess = perf.get("min_annual_excess_return_pct", 0.0)  # 最小超過リターン
+    n_periods = perf.get("n_periods", 0)  # P10算出に使ったサンプル数（ChatGPT推奨）
+    
+    # サンプル数が少ない場合は警告（P10の信頼性が低い可能性がある）
+    if n_periods < 12:  # 12Mなら12、24Mなら10等の閾値は将来調整可能
+        print(f"      [objective_longterm] ⚠️  警告: n_periods={n_periods}が少ないため、P10の信頼性が低い可能性があります")
     
     # 下振れ罰: P10が負の場合はペナルティ、正の場合はボーナス（係数λ）
     downside_penalty = lambda_penalty * min(0.0, p10_excess)  # P10が負の場合のみペナルティ
@@ -761,7 +788,7 @@ def objective_longterm(
         f"[Trial {trial.number}] "
         f"objective={objective_value:.4f}%, "
         f"mean_excess={mean_excess:.4f}%, "
-        f"p10_excess={p10_excess:.4f}%, "
+        f"p10_excess={p10_excess:.4f}% (n_periods={n_periods}), "
         f"downside_penalty={downside_penalty:.4f}%, "
         f"median_excess={perf['median_annual_excess_return_pct']:.4f}%, "
         f"median_return={perf['median_annual_return_pct']:.4f}%, "
