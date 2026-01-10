@@ -783,6 +783,16 @@ def objective_longterm(
     # 目的関数: 平均超過 - 下振れ罰
     objective_value = mean_excess + downside_penalty
     
+    # mean_excessとp10_excessをtrialに保存（将来のλ再採点用、ChatGPT推奨）
+    # 注意: これにより、既存のstudy DBから異なるλ値で再採点が可能になる
+    trial.set_user_attr("mean_excess", mean_excess)
+    trial.set_user_attr("p10_excess", p10_excess)
+    trial.set_user_attr("n_periods", n_periods)
+    trial.set_user_attr("min_excess", min_excess)
+    trial.set_user_attr("median_excess", perf["median_annual_excess_return_pct"])
+    trial.set_user_attr("win_rate", perf["win_rate"])
+    trial.set_user_attr("lambda_penalty", lambda_penalty)  # 使用したλ値も保存
+    
     # デバッグ用ログ出力（下振れ指標を含む）
     log_msg = (
         f"[Trial {trial.number}] "
