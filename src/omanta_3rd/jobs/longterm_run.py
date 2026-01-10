@@ -205,6 +205,92 @@ def _entry_score(close: pd.Series) -> float:
     return float(np.nanmax(scores))
 
 
+def _entry_score_with_params(close: pd.Series, params: Any) -> float:
+    """
+    パラメータ化されたentry_score計算
+    
+    Args:
+        close: 終値のSeries
+        params: EntryScoreParams（dataclass、循環インポート回避のためAny型）
+    
+    Returns:
+        entry_score
+    """
+    scores = []
+    for n in (20, 60, 90):
+        z = _bb_zscore(close, n)
+        rsi = _rsi_from_series(close, n)
+
+        bb_score = np.nan
+        rsi_score = np.nan
+
+        if not pd.isna(z):
+            # 最小幅チェック（分母が0に近くなるのを防ぐ）
+            bb_z_diff = params.bb_z_max - params.bb_z_base
+            if abs(bb_z_diff) >= getattr(params, 'bb_z_min_width', 0.5):
+                # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
+                # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
+                raw_score = (z - params.bb_z_base) / bb_z_diff
+                bb_score = np.clip(raw_score, 0.0, 1.0)
+            else:
+                bb_score = np.nan
+                
+        if not pd.isna(rsi):
+            # 最小幅チェック（分母が0に近くなるのを防ぐ）
+            rsi_diff = params.rsi_max - params.rsi_base
+            if abs(rsi_diff) >= getattr(params, 'rsi_min_width', 10.0):
+                # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
+                # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
+                raw_score = (rsi - params.rsi_base) / rsi_diff
+                rsi_score = np.clip(raw_score, 0.0, 1.0)
+            else:
+                rsi_score = np.nan
+
+        # 重み付き合計
+        total_weight = params.bb_weight + params.rsi_weight
+        if total_weight > 0:
+            if not pd.isna(bb_score) and not pd.isna(rsi_score):
+                scores.append(
+                    (params.bb_weight * bb_score + params.rsi_weight * rsi_score) / total_weight
+                )
+            elif not pd.isna(bb_score):
+                scores.append(bb_score)
+            elif not pd.isna(rsi_score):
+                scores.append(rsi_score)
+
+    if not scores:
+        return np.nan
+    return float(np.nanmax(scores))
+
+
+def _calculate_entry_score_with_params(
+    feat: pd.DataFrame,
+    prices_win: pd.DataFrame,
+    params: Any,  # EntryScoreParams（循環インポート回避のためAny型）
+) -> pd.DataFrame:
+    """
+    パラメータ化されたentry_scoreを計算
+    
+    Args:
+        feat: 特徴量DataFrame
+        prices_win: 価格データ
+        params: EntryScoreParams（循環インポート回避のためAny型）
+    
+    Returns:
+        entry_scoreが追加されたfeat
+    """
+    close_map = {
+        c: g["adj_close"].reset_index(drop=True)
+        for c, g in prices_win.groupby("code")
+    }
+    feat["entry_score"] = feat["code"].apply(
+        lambda c: _entry_score_with_params(close_map.get(c), params)
+        if c in close_map
+        else np.nan
+    )
+    return feat
+
+
 # -----------------------------
 # Data load helpers
 # -----------------------------
@@ -1185,8 +1271,8 @@ def build_features(
     fc_latest = _load_latest_forecast(conn, price_date)
     print(f"[count] latest forecast rows: {len(fc_latest)}")
 
-    fy_hist = _load_fy_history(conn, price_date, years=10)
-    print(f"[count] FY history rows (<=10 per code): {len(fy_hist)}")
+    fy_hist = _load_fy_history(conn, price_date, years=3)
+    print(f"[count] FY history rows (<=3 per code): {len(fy_hist)}")
 
     df = universe.merge(px_today, on="code", how="inner")
     df = df.merge(liq, on="code", how="left")
@@ -1440,9 +1526,24 @@ def build_features(
     df["profit_growth"] = df.apply(lambda r: _safe_div(r.get("forecast_profit"), r.get("profit")) - 1.0, axis=1)
 
     # Record high (forecast OP vs past max FY OP)
-    if not fy_hist.empty:
-        op_max = fy_hist.groupby("code", as_index=False)["operating_profit"].max().rename(columns={"operating_profit": "op_max_past"})
-        df = df.merge(op_max, on="code", how="left")
+    # 過去の取得できる（None以外の）利益を全て参照して、リバランス日（ポートフォリオ作成日）における最新の利益が最高益になっているかどうかをチェック
+    # リバランス日以前に開示されたデータのみを参照（データリーク防止）
+    # fy_histはyears=3に制限されているため、最高益フラグの計算では全期間のデータを直接取得する
+    op_max_df = pd.read_sql_query(
+        """
+        SELECT code, MAX(operating_profit) as op_max_past
+        FROM fins_statements
+        WHERE disclosed_date <= ?
+          AND current_period_end <= ?
+          AND type_of_current_period = 'FY'
+          AND operating_profit IS NOT NULL
+        GROUP BY code
+        """,
+        conn,
+        params=(price_date, price_date),  # price_dateはリバランス日（ポートフォリオ作成日）
+    )
+    if not op_max_df.empty:
+        df = df.merge(op_max_df, on="code", how="left")
     else:
         df["op_max_past"] = np.nan
 
@@ -1452,7 +1553,7 @@ def build_features(
         (df["forecast_operating_profit"] >= df["op_max_past"])
     ).astype(int)
 
-    # Operating profit trend (5y slope)  ← A案
+    # Operating profit trend (3y slope)  ← 5年→3年に変更
     if not fy_hist.empty:
         fh = fy_hist.copy()
         fh["current_period_end"] = pd.to_datetime(fh["current_period_end"], errors="coerce")
@@ -1460,7 +1561,7 @@ def build_features(
 
         slopes = []
         for code, g in fh.groupby("code"):
-            vals = g["operating_profit"].tail(5).tolist()
+            vals = g["operating_profit"].tail(3).tolist()
             slopes.append((code, _calc_slope(vals)))
 
         op_trend_df = pd.DataFrame(slopes, columns=["code", "op_trend"])

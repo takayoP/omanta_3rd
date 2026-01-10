@@ -33,6 +33,114 @@ from ..config.settings import PROJECT_ROOT
 from ..jobs.params_utils import normalize_params
 
 
+def calculate_core_contributions(
+    feat: pd.DataFrame,
+    strategy_params: Any,
+    top_n: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Core scoreの上位寄与Top3を計算
+    
+    Args:
+        feat: 特徴量DataFrame
+        strategy_params: 戦略パラメータ
+        top_n: 上位N件（デフォルト: 3）
+    
+    Returns:
+        寄与度のリスト（各要素は {"component": str, "contribution": float}）
+    """
+    if feat.empty:
+        return []
+    
+    # 重みを取得
+    w_quality = strategy_params.w_quality if strategy_params else 0.0
+    w_value = strategy_params.w_value if strategy_params else 0.0
+    w_growth = strategy_params.w_growth if strategy_params else 0.0
+    w_record_high = strategy_params.w_record_high if strategy_params else 0.0
+    w_size = strategy_params.w_size if strategy_params else 0.0
+    
+    # 各コンポーネントの寄与度を計算（平均値）
+    contributions = []
+    
+    if "quality_score" in feat.columns:
+        avg_quality = feat["quality_score"].mean() if not feat["quality_score"].isna().all() else 0.0
+        contributions.append({
+            "component": "quality",
+            "contribution": w_quality * avg_quality,
+        })
+    
+    if "value_score" in feat.columns:
+        avg_value = feat["value_score"].mean() if not feat["value_score"].isna().all() else 0.0
+        contributions.append({
+            "component": "value",
+            "contribution": w_value * avg_value,
+        })
+    
+    if "growth_score" in feat.columns:
+        avg_growth = feat["growth_score"].mean() if not feat["growth_score"].isna().all() else 0.0
+        contributions.append({
+            "component": "growth",
+            "contribution": w_growth * avg_growth,
+        })
+    
+    if "record_high_score" in feat.columns:
+        avg_record_high = feat["record_high_score"].mean() if not feat["record_high_score"].isna().all() else 0.0
+        contributions.append({
+            "component": "record_high",
+            "contribution": w_record_high * avg_record_high,
+        })
+    
+    if "size_score" in feat.columns:
+        avg_size = feat["size_score"].mean() if not feat["size_score"].isna().all() else 0.0
+        contributions.append({
+            "component": "size",
+            "contribution": w_size * avg_size,
+        })
+    
+    # 寄与度でソートして上位N件を返す
+    contributions.sort(key=lambda x: x["contribution"], reverse=True)
+    return contributions[:top_n]
+
+
+def calculate_entry_contributions(
+    feat: pd.DataFrame,
+    entry_params: Any,
+    top_n: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    Entry scoreの寄与Top2を計算（BB系/RSI系どちらが効いたか）
+    
+    Args:
+        feat: 特徴量DataFrame（entry_scoreが含まれている必要がある）
+        entry_params: Entry scoreパラメータ
+        top_n: 上位N件（デフォルト: 2）
+    
+    Returns:
+        寄与度のリスト（各要素は {"component": str, "value": float}）
+    """
+    if feat.empty or "entry_score" not in feat.columns:
+        return []
+    
+    # Entry scoreが計算されている銘柄のみを対象
+    valid_feat = feat[feat["entry_score"].notna()].copy()
+    
+    if valid_feat.empty:
+        return []
+    
+    # Entry scoreの平均値を返す（BB/RSIの個別寄与は計算が複雑なため、簡易版）
+    # 実際の実装では、entry_score計算時にBB/RSIの個別寄与を記録する必要がある
+    avg_entry_score = valid_feat["entry_score"].mean()
+    
+    contributions = [
+        {
+            "component": "entry_score",
+            "value": float(avg_entry_score),
+        }
+    ]
+    
+    return contributions[:top_n]
+
+
 def save_regime_switch_log(
     log_data: Dict[str, Any],
     output_dir: Optional[Path] = None,
@@ -66,6 +174,8 @@ def run_monthly_portfolio_with_regime(
     calculate_performance: bool = True,
     as_of_date: Optional[str] = None,
     save_log: bool = True,
+    save_to_db: bool = True,
+    allowed_params_ids: Optional[set[str]] = None,
 ) -> dict:
     """
     レジーム切替対応の月次ポートフォリオ作成
@@ -76,6 +186,10 @@ def run_monthly_portfolio_with_regime(
         calculate_performance: パフォーマンスを計算するか
         as_of_date: 評価日（YYYY-MM-DD、Noneの場合は最新）
         save_log: ログを保存するか
+        save_to_db: データベースに保存するか
+        allowed_params_ids: 許可されたparams_idのセット（Noneの場合はすべて許可）
+                          レジーム切替モードで、選択されたparams_idが許可リストに含まれていない場合、
+                          12M_momentumにフォールバック
     
     Returns:
         実行結果の辞書
@@ -102,6 +216,13 @@ def run_monthly_portfolio_with_regime(
                 regime_info = get_market_regime(conn, rebalance_date)
                 regime = regime_info["regime"]
                 params_id = get_params_id_for_regime(regime)
+                
+                # allowed_params_idsが指定されている場合、許可リストをチェック
+                if allowed_params_ids is not None and params_id not in allowed_params_ids:
+                    # 許可リストに含まれていない場合、12M_momentumにフォールバック
+                    original_params_id = params_id
+                    params_id = "12M_momentum"
+                    print(f"[{rebalance_date}] ⚠️  選択されたparams_id ({original_params_id}) が許可リストに含まれていません。{params_id}にフォールバックします。")
             
             result["regime"] = regime
             result["params_id"] = params_id
@@ -110,6 +231,9 @@ def run_monthly_portfolio_with_regime(
             params_dict = load_params_by_id_longterm(params_id)
             registry_entry = get_registry_entry(params_id)
             horizon_months = registry_entry.get("horizon_months")
+            
+            # resultにhorizon_monthsを追加
+            result["horizon_months"] = horizon_months
             
             # パラメータ辞書をStrategyParamsとEntryScoreParamsに変換
             strategy_params, entry_params = normalize_params(params_dict)
@@ -133,12 +257,14 @@ def run_monthly_portfolio_with_regime(
                 return result
             
             # 5. データベースに保存
-            print(f"[{rebalance_date}] データベースに保存中...")
-            save_features(conn, feat)
-            save_portfolio(conn, portfolio)
+            if save_to_db:
+                print(f"[{rebalance_date}] データベースに保存中...")
+                save_features(conn, feat)
+                save_portfolio(conn, portfolio)
             
             result["portfolio_created"] = True
             result["num_stocks"] = len(portfolio)
+            result["portfolio"] = portfolio  # ポートフォリオDataFrameを返す
             
             # 6. パフォーマンスを計算
             if calculate_performance:
@@ -154,6 +280,14 @@ def run_monthly_portfolio_with_regime(
             
             # 7. ログを保存
             if save_log:
+                # Core寄与Top3を計算（最終採用銘柄のみ）
+                selected_codes = set(portfolio["code"].tolist())
+                selected_feat = feat[feat["code"].isin(selected_codes)].copy()
+                core_contributions = calculate_core_contributions(selected_feat, strategy_params, top_n=3)
+                
+                # Entry寄与Top2を計算（最終採用銘柄のみ）
+                entry_contributions = calculate_entry_contributions(selected_feat, entry_params, top_n=2)
+                
                 log_data = {
                     "date": rebalance_date,
                     "regime": regime,
@@ -163,6 +297,8 @@ def run_monthly_portfolio_with_regime(
                     "core_top80": feat.nlargest(80, "core_score")["code"].tolist() if len(feat) >= 80 else feat["code"].tolist(),
                     "final_selected": portfolio["code"].tolist(),
                     "num_stocks": len(portfolio),
+                    "core_contributions_top3": core_contributions,
+                    "entry_contributions_top2": entry_contributions,
                 }
                 log_file = save_regime_switch_log(log_data)
                 result["log_file"] = str(log_file)

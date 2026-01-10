@@ -108,7 +108,8 @@ def calculate_entry_score(
     Args:
         conn: データベース接続
         code: 銘柄コード
-        as_of_date: 基準日（YYYY-MM-DD）
+        as_of_date: リバランス日（ポートフォリオ作成日、YYYY-MM-DD）
+                    リバランス日以前に開示されたデータのみを参照
         config: 戦略設定
         
     Returns:
@@ -128,15 +129,18 @@ def calculate_entry_score(
     
     price = row["adj_close"]
     
-    # PER/PBR
+    # PER/PBR（リバランス日（ポートフォリオ作成日）以前に開示されたデータのみ）
     sql = """
         SELECT eps, bvps, forecast_eps
         FROM fins_statements
-        WHERE code = ? AND type_of_current_period = 'FY'
-        ORDER BY current_period_end DESC
+        WHERE code = ? 
+          AND type_of_current_period = 'FY'
+          AND disclosed_date <= ?
+          AND current_period_end <= ?
+        ORDER BY current_period_end DESC, disclosed_date DESC
         LIMIT 1
     """
-    row = conn.execute(sql, (code,)).fetchone()
+    row = conn.execute(sql, (code, as_of_date, as_of_date)).fetchone()
     if not row:
         return None
     
@@ -157,19 +161,23 @@ def calculate_entry_score(
         valuation_score += pbr_score * 0.5
     
     # 最高益フラグ
+    # リバランス日（ポートフォリオ作成日）以前に開示されたデータのみを参照
     sql = """
         SELECT current_period_end
         FROM fins_statements
-        WHERE code = ? AND type_of_current_period = 'FY'
-        ORDER BY current_period_end DESC
+        WHERE code = ? 
+          AND type_of_current_period = 'FY'
+          AND disclosed_date <= ?
+          AND current_period_end <= ?
+        ORDER BY current_period_end DESC, disclosed_date DESC
         LIMIT 1
     """
-    row = conn.execute(sql, (code,)).fetchone()
+    row = conn.execute(sql, (code, as_of_date, as_of_date)).fetchone()
     current_period_end = row["current_period_end"] if row else None
     
     from ..features.fundamentals import check_record_high
     record_high_flag, record_high_forecast_flag = (
-        check_record_high(conn, code, current_period_end) if current_period_end
+        check_record_high(conn, code, current_period_end, as_of_date) if current_period_end
         else (False, False)
     )
     

@@ -10,6 +10,10 @@ from ..infra.db import connect_db, upsert
 from ..infra.jquants import JQuantsClient
 
 
+# TOPIX指数のコード定数
+TOPIX_CODE = "0000"
+
+
 def _daterange(date_from: str, date_to: str) -> List[str]:
     """
     date_from〜date_to（YYYY-MM-DD）の全日付を返す（週末含む）
@@ -26,7 +30,10 @@ def _daterange(date_from: str, date_to: str) -> List[str]:
 
 def fetch_index_by_date(client: JQuantsClient, index_code: str, date: str) -> List[Dict[str, Any]]:
     """
-    /v2/indices/bars/daily から指数データを取得
+    指数データを取得
+    
+    TOPIX指数の場合は専用エンドポイント(/v2/indices/bars/daily/topix)を使用します。
+    その他の指数の場合は従来のエンドポイント(/v2/indices/bars/daily)を使用します。
     
     Args:
         client: J-Quants APIクライアント
@@ -36,7 +43,12 @@ def fetch_index_by_date(client: JQuantsClient, index_code: str, date: str) -> Li
     Returns:
         指数データのリスト
     """
-    rows = client.get_all_pages("/indices/bars/daily", params={"code": index_code, "date": date})
+    if index_code == TOPIX_CODE:
+        # TOPIX専用エンドポイント
+        rows = client.get_all_pages("/indices/bars/daily/topix", params={"date": date})
+    else:
+        # その他の指数用エンドポイント
+        rows = client.get_all_pages("/indices/bars/daily", params={"code": index_code, "date": date})
     return rows
 
 
@@ -47,7 +59,10 @@ def fetch_index_by_range(
     date_to: str
 ) -> List[Dict[str, Any]]:
     """
-    /v2/indices/bars/daily から指数データを期間指定で取得
+    指数データを期間指定で取得
+    
+    TOPIX指数の場合は専用エンドポイント(/v2/indices/bars/daily/topix)を使用します。
+    その他の指数の場合は従来のエンドポイント(/v2/indices/bars/daily)を使用します。
     
     Args:
         client: J-Quants APIクライアント
@@ -58,10 +73,18 @@ def fetch_index_by_range(
     Returns:
         指数データのリスト
     """
-    rows = client.get_all_pages(
-        "/indices/bars/daily", 
-        params={"code": index_code, "from": date_from, "to": date_to}
-    )
+    if index_code == TOPIX_CODE:
+        # TOPIX専用エンドポイント
+        rows = client.get_all_pages(
+            "/indices/bars/daily/topix", 
+            params={"from": date_from, "to": date_to}
+        )
+    else:
+        # その他の指数用エンドポイント
+        rows = client.get_all_pages(
+            "/indices/bars/daily", 
+            params={"code": index_code, "from": date_from, "to": date_to}
+        )
     return rows
 
 
@@ -152,8 +175,4 @@ def ingest_index_data(
     
     if buf:
         save_index_data(buf)
-
-
-# TOPIX指数のコード定数
-TOPIX_CODE = "0000"
 

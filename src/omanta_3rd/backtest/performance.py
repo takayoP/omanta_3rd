@@ -11,7 +11,7 @@ from ..infra.db import connect_db, upsert
 from ..ingest.indices import TOPIX_CODE
 
 
-def _get_next_trading_day(conn, date: str) -> Optional[str]:
+def _get_next_trading_day(conn, date: str, max_date: Optional[str] = None) -> Optional[str]:
     """
     指定日付の翌営業日を取得（価格データが存在する最初の営業日）
     
@@ -25,6 +25,8 @@ def _get_next_trading_day(conn, date: str) -> Optional[str]:
     Args:
         conn: データベース接続
         date: 基準日（YYYY-MM-DD）
+        max_date: 最大日付（YYYY-MM-DD、Noneの場合は制限なし）
+                  データリーク防止のため、リバランス日以前のデータのみを参照
     
     Returns:
         翌営業日（YYYY-MM-DD）、存在しない場合はNone
@@ -33,18 +35,34 @@ def _get_next_trading_day(conn, date: str) -> Optional[str]:
     
     # データベースから、基準日より後の日付で、価格データ（openまたはclose）がNULLでない日付を取得
     # 最大7日分を確認
-    next_dates_df = pd.read_sql_query(
-        """
-        SELECT DISTINCT date
-        FROM prices_daily
-        WHERE date > ?
-          AND (open IS NOT NULL OR close IS NOT NULL)
-        ORDER BY date
-        LIMIT 7
-        """,
-        conn,
-        params=(date,),
-    )
+    # 重要: max_dateが指定されている場合、max_date以前のデータのみを参照（データリーク防止）
+    if max_date is not None:
+        next_dates_df = pd.read_sql_query(
+            """
+            SELECT DISTINCT date
+            FROM prices_daily
+            WHERE date > ?
+              AND date <= ?
+              AND (open IS NOT NULL OR close IS NOT NULL)
+            ORDER BY date
+            LIMIT 7
+            """,
+            conn,
+            params=(date, max_date),
+        )
+    else:
+        next_dates_df = pd.read_sql_query(
+            """
+            SELECT DISTINCT date
+            FROM prices_daily
+            WHERE date > ?
+              AND (open IS NOT NULL OR close IS NOT NULL)
+            ORDER BY date
+            LIMIT 7
+            """,
+            conn,
+            params=(date,),
+        )
     
     if next_dates_df.empty:
         return None
@@ -198,33 +216,28 @@ def calculate_portfolio_performance(
                 "error": "ポートフォリオが見つかりません",
             }
         
-        # 評価日を決定
-        # 重要: as_of_dateがNoneの場合は最新の価格データの日付を使用
-        #       これにより、SQLクエリでdate <= ?の部分でNoneが渡されることを防ぐ
+        # 評価日を決定（必須）
+        # 重要: データリークを防ぐため、as_of_dateは必須とする
+        #       DB MAX(date)は使用しない（未来参照リーク防止）
         if as_of_date is None:
-            latest_date_df = pd.read_sql_query(
-                "SELECT MAX(date) as max_date FROM prices_daily",
-                conn
-            )
-            if latest_date_df.empty or pd.isna(latest_date_df["max_date"].iloc[0]):
-                return {
-                    "rebalance_date": rebalance_date,
-                    "as_of_date": None,
-                    "error": "価格データが見つかりません",
-                }
-            as_of_date = str(latest_date_df["max_date"].iloc[0])  # 文字列として保証
+            return {
+                "rebalance_date": rebalance_date,
+                "as_of_date": None,
+                "error": "as_of_dateは必須です。データリークを防ぐため、リバランス日以前の日付を明示的に指定してください。",
+            }
         
         # 型チェック: as_of_dateが文字列であることを保証（SQLクエリで使用するため）
         if not isinstance(as_of_date, str):
             as_of_date = str(as_of_date)
         
         # リバランス日の翌営業日を取得
-        next_trading_day = _get_next_trading_day(conn, rebalance_date)
+        # 重要: as_of_date以前のデータのみを参照（データリーク防止）
+        next_trading_day = _get_next_trading_day(conn, rebalance_date, max_date=as_of_date)
         if next_trading_day is None:
             return {
                 "rebalance_date": rebalance_date,
                 "as_of_date": as_of_date,
-                "error": f"リバランス日の翌営業日が見つかりません: {rebalance_date}",
+                "error": f"リバランス日の翌営業日が見つかりません: {rebalance_date} (as_of_date={as_of_date}以前のデータを参照)",
             }
         
         # 各銘柄のリバランス日の翌営業日の始値を取得（購入価格）

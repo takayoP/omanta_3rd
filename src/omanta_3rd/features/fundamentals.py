@@ -26,7 +26,7 @@ def calculate_roe_trend(
     conn: sqlite3.Connection,
     code: str,
     current_period_end: str,
-    periods: int = 4,
+    periods: int = 3,
 ) -> Optional[float]:
     """
     ROEのトレンドを計算（過去N期の平均ROEとの比較）
@@ -84,6 +84,7 @@ def check_record_high(
     conn: sqlite3.Connection,
     code: str,
     current_period_end: str,
+    rebalance_date: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     """
     最高益フラグをチェック（実績/予想）
@@ -92,30 +93,41 @@ def check_record_high(
         conn: データベース接続
         code: 銘柄コード
         current_period_end: 現在の期末日（YYYY-MM-DD）
+        rebalance_date: リバランス日（ポートフォリオ作成日、YYYY-MM-DD、データリーク防止のため必須）
+                        リバランス日以前に開示されたデータのみを参照
         
     Returns:
         (実績最高益フラグ, 予想最高益フラグ)
     """
-    # 最新の実績利益を取得
+    if rebalance_date is None:
+        raise ValueError("rebalance_dateは必須です。データリークを防ぐため、リバランス日（ポートフォリオ作成日）を明示的に指定してください。")
+    
+    # 最新の実績利益を取得（リバランス日以前に開示されたデータのみ）
     sql = """
         SELECT profit
         FROM fins_statements
-        WHERE code = ? AND type_of_current_period = 'FY'
-        ORDER BY current_period_end DESC
+        WHERE code = ? 
+          AND type_of_current_period = 'FY'
+          AND disclosed_date <= ?
+          AND current_period_end <= ?
+        ORDER BY current_period_end DESC, disclosed_date DESC
         LIMIT 1
     """
-    row = conn.execute(sql, (code,)).fetchone()
+    row = conn.execute(sql, (code, rebalance_date, rebalance_date)).fetchone()
     current_profit = row["profit"] if row else None
     
-    # 過去最高の実績利益を取得
+    # 過去最高の実績利益を取得（過去の取得できる（None以外の）利益を全て参照）
+    # リバランス日以前に開示されたデータのみを参照
     sql = """
         SELECT MAX(profit) as max_profit
         FROM fins_statements
-        WHERE code = ? AND type_of_current_period = 'FY'
+        WHERE code = ? 
+          AND type_of_current_period = 'FY'
           AND current_period_end < ?
+          AND disclosed_date <= ?
           AND profit IS NOT NULL
     """
-    row = conn.execute(sql, (code, current_period_end)).fetchone()
+    row = conn.execute(sql, (code, current_period_end, rebalance_date)).fetchone()
     max_past_profit = row["max_profit"] if row else None
     
     record_high_flag = (
@@ -124,15 +136,18 @@ def check_record_high(
         and current_profit > max_past_profit
     )
     
-    # 予想最高益フラグ
+    # 予想最高益フラグ（リバランス日以前に開示されたデータのみ）
     sql = """
         SELECT forecast_profit
         FROM fins_statements
-        WHERE code = ? AND type_of_current_period = 'FY'
-        ORDER BY current_period_end DESC
+        WHERE code = ? 
+          AND type_of_current_period = 'FY'
+          AND disclosed_date <= ?
+          AND current_period_end <= ?
+        ORDER BY current_period_end DESC, disclosed_date DESC
         LIMIT 1
     """
-    row = conn.execute(sql, (code,)).fetchone()
+    row = conn.execute(sql, (code, rebalance_date, rebalance_date)).fetchone()
     current_forecast = row["forecast_profit"] if row else None
     
     record_high_forecast_flag = (
