@@ -173,7 +173,7 @@ def _select_portfolio_with_params(
     )
     
     # entry_scoreを計算（パラメータ化版）
-    # 注意: _run_single_backtest_portfolio_only内で既にentry_scoreが計算されている場合はスキップ
+    # 注意: _select_portfolio_for_rebalance_date内で既にentry_scoreが計算されている場合はスキップ
     if "entry_score" not in feat.columns or feat["entry_score"].isna().all():
         # entry_scoreが存在しない、または全てNaNの場合は計算
         print(f"        [_select_portfolio] entry_score再計算が必要（DBから価格データ取得）")
@@ -349,12 +349,12 @@ def _run_single_backtest(
         # 1) feat を必ず作る（read_only失敗ならread_writeへ）
         try:
             with connect_db(read_only=True) as conn:
-                feat = build_features(conn, rebalance_date)
+                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
         except sqlite3.OperationalError as e:
             # 読み取り専用エラーの場合は通常の接続を使用
             if "readonly" in str(e).lower() or "read-only" in str(e).lower():
                 with connect_db(read_only=False) as conn:
-                    feat = build_features(conn, rebalance_date)
+                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
             else:
                 raise
         
@@ -362,10 +362,8 @@ def _run_single_backtest(
         if feat is None or feat.empty:
             return None
         
-        # ポートフォリオを選択（パラメータ化版）
-        portfolio = _select_portfolio_with_params(
-            feat, strategy_params, entry_params
-        )
+        # ポートフォリオを選択（等ウェイト：本番運用と同じ）
+        portfolio = select_portfolio(feat, strategy_params=strategy_params)
         
         if portfolio is None or portfolio.empty:
             return None
@@ -411,13 +409,17 @@ def _calculate_performance_single(
     return None
 
 
-def _run_single_backtest_portfolio_only(
+def _select_portfolio_for_rebalance_date(
     rebalance_date: str,
     strategy_params_dict: dict,
     entry_params_dict: dict,
 ) -> Optional[pd.DataFrame]:
     """
     単一のリバランス日に対するポートフォリオ選定のみ（並列化用）
+    
+    【注意】この関数は「ポートフォリオ選定のみ」を行います。パフォーマンス計算は行いません。
+    長期保有型と月次リバランス型の両方で使用可能です。
+    違いは「パフォーマンス計算方法」のみです（長期保有型：固定ホライズン評価、月次リバランス型：月次リターン系列）。
     
     Args:
         rebalance_date: リバランス日
@@ -435,21 +437,19 @@ def _run_single_backtest_portfolio_only(
         # feat を必ず作る（read_only失敗ならread_writeへ）
         try:
             with connect_db(read_only=True) as conn:
-                feat = build_features(conn, rebalance_date)
+                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
         except sqlite3.OperationalError as e:
             if "readonly" in str(e).lower() or "read-only" in str(e).lower():
                 with connect_db(read_only=False) as conn:
-                    feat = build_features(conn, rebalance_date)
+                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
             else:
                 raise
         
         if feat is None or feat.empty:
             return None
         
-        # ポートフォリオを選択（パラメータ化版）
-        portfolio = _select_portfolio_with_params(
-            feat, strategy_params, entry_params
-        )
+        # ポートフォリオを選択（等ウェイト：本番運用と同じ）
+        portfolio = select_portfolio(feat, strategy_params=strategy_params)
         
         if portfolio is None or portfolio.empty:
             return None
@@ -510,7 +510,7 @@ def run_backtest_for_optimization(
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {
                 executor.submit(
-                    _run_single_backtest_portfolio_only,
+                    _select_portfolio_for_rebalance_date,
                     rebalance_date,
                     strategy_params_dict,
                     entry_params_dict,
@@ -529,7 +529,7 @@ def run_backtest_for_optimization(
     else:
         # 逐次実行
         for rebalance_date in rebalance_dates:
-            portfolio = _run_single_backtest_portfolio_only(
+            portfolio = _select_portfolio_for_rebalance_date(
                 rebalance_date,
                 strategy_params_dict,
                 entry_params_dict,

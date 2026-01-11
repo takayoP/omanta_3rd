@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import random
+import hashlib
 from dataclasses import dataclass, replace, fields
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -45,14 +46,11 @@ from ..backtest.feature_cache import FeatureCache
 from ..backtest.performance import calculate_portfolio_performance
 from ..jobs.optimize import (
     EntryScoreParams,
-    _entry_score_with_params,
-    _calculate_entry_score_with_params,
-    _select_portfolio_with_params,
 )
 
 # optimize_timeseries.pyから必要な関数をインポート
 from .optimize_timeseries import (
-    _run_single_backtest_portfolio_only,
+    _select_portfolio_for_rebalance_date,
     _setup_blas_threads,
 )
 
@@ -173,6 +171,7 @@ def calculate_longterm_performance(
     horizon_months: Optional[int] = None,
     require_full_horizon: bool = True,
     as_of_date: Optional[str] = None,
+    debug_rebalance_dates: Optional[set] = None,
 ) -> Dict[str, Any]:
     """
     長期保有型のパフォーマンスを計算（固定ホライズン評価）
@@ -190,6 +189,7 @@ def calculate_longterm_performance(
         as_of_date: 評価の打ち切り日（YYYY-MM-DD、必須）
                     **重要**: 未来参照リークを防ぐため、必ず明示的に指定してください（例: end_dateを渡す）
                     Noneの場合はエラーを発生させます（DB MAX(date)は使用しません）
+        debug_rebalance_dates: デバッグ出力するリバランス日のセット（Noneの場合は出力なし）
     
     Returns:
         パフォーマンス指標の辞書
@@ -229,7 +229,7 @@ def calculate_longterm_performance(
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {
                 executor.submit(
-                    _run_single_backtest_portfolio_only,
+                    _select_portfolio_for_rebalance_date,
                     rebalance_date,
                     strategy_params_dict,
                     entry_params_dict,
@@ -254,7 +254,7 @@ def calculate_longterm_performance(
         for i, rebalance_date in enumerate(rebalance_dates, 1):
             print(f"      [calculate_longterm_performance] 処理中 ({i}/{len(rebalance_dates)}): {rebalance_date}")
             sys.stdout.flush()
-            portfolio = _run_single_backtest_portfolio_only(
+            portfolio = _select_portfolio_for_rebalance_date(
                 rebalance_date,
                 strategy_params_dict,
                 entry_params_dict,
@@ -378,6 +378,91 @@ def calculate_longterm_performance(
             perf = calculate_portfolio_performance(rebalance_date, eval_date)
             if "error" not in perf:
                 performances.append(perf)
+                
+                # デバッグ出力（指定されたrebalance_dateのみ）
+                if debug_rebalance_dates and rebalance_date in debug_rebalance_dates:
+                    # ポートフォリオの銘柄コードと重みを取得
+                    selected_codes = list(portfolio_df.index)
+                    weights = [float(row.get("weight", 0.0)) for _, row in portfolio_df.iterrows()]
+                    
+                    # 年率化リターンを計算（保有期間を計算）
+                    rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
+                    eval_dt = datetime.strptime(eval_date, "%Y-%m-%d")
+                    holding_years = (eval_dt - rebalance_dt).days / 365.25
+                    
+                    total_return_pct = perf.get("total_return_pct")
+                    topix_comparison = perf.get("topix_comparison", {})
+                    topix_return_pct = topix_comparison.get("topix_return_pct")
+                    
+                    annualized_total_return_pct = None
+                    annualized_topix_return_pct = None
+                    annualized_excess_return_pct = None
+                    
+                    if total_return_pct is not None and not pd.isna(total_return_pct) and holding_years > 0:
+                        return_factor = 1 + total_return_pct / 100
+                        if return_factor > 0:
+                            annualized_total_return = return_factor ** (1 / holding_years) - 1
+                            annualized_total_return_pct = annualized_total_return * 100
+                            
+                            if topix_return_pct is not None and not pd.isna(topix_return_pct):
+                                topix_return_factor = 1 + topix_return_pct / 100
+                                if topix_return_factor > 0:
+                                    annualized_topix_return = topix_return_factor ** (1 / holding_years) - 1
+                                    annualized_topix_return_pct = annualized_topix_return * 100
+                                    annualized_excess_return_pct = annualized_total_return_pct - annualized_topix_return_pct
+                    
+                    # params_hashを計算（strategy_paramsとentry_paramsを統合してハッシュ）
+                    # compare側と同じ方式: params辞書をキーソートしてJSON化してハッシュ
+                    params_dict = {
+                        "w_quality": strategy_params.w_quality,
+                        "w_value": strategy_params.w_value,
+                        "w_growth": strategy_params.w_growth,
+                        "w_record_high": strategy_params.w_record_high,
+                        "w_size": strategy_params.w_size,
+                        "w_forward_per": strategy_params.w_forward_per,
+                        "w_pbr": strategy_params.w_pbr,
+                        "roe_min": strategy_params.roe_min,
+                        "liquidity_quantile_cut": strategy_params.liquidity_quantile_cut,
+                        "rsi_base": entry_params.rsi_base,
+                        "rsi_max": entry_params.rsi_max,
+                        "bb_z_base": entry_params.bb_z_base,
+                        "bb_z_max": entry_params.bb_z_max,
+                        "bb_weight": entry_params.bb_weight,
+                        "rsi_weight": entry_params.rsi_weight,
+                        "rsi_min_width": entry_params.rsi_min_width,
+                        "bb_z_min_width": entry_params.bb_z_min_width,
+                    }
+                    params_sorted = dict(sorted(params_dict.items()))
+                    params_json = json.dumps(params_sorted, sort_keys=True, ensure_ascii=False)
+                    params_hash = hashlib.sha1(params_json.encode('utf-8')).hexdigest()[:8]
+                    
+                    # portfolio_hashを計算（selected_codes + weightsをソートしてJSON化してハッシュ）
+                    portfolio_data = {
+                        "selected_codes": sorted(selected_codes),
+                        "weights": sorted(weights),
+                    }
+                    portfolio_json = json.dumps(portfolio_data, sort_keys=True, ensure_ascii=False)
+                    portfolio_hash = hashlib.sha1(portfolio_json.encode('utf-8')).hexdigest()[:8]
+                    
+                    # JSONL形式で出力
+                    debug_info = {
+                        "rebalance_date": rebalance_date,
+                        "entry_date": rebalance_date,
+                        "exit_date": eval_date,
+                        "selected_codes": selected_codes,
+                        "weights": weights,
+                        "total_return_pct": float(total_return_pct) if total_return_pct is not None and not pd.isna(total_return_pct) else None,
+                        "topix_return_pct": float(topix_return_pct) if topix_return_pct is not None and not pd.isna(topix_return_pct) else None,
+                        "excess_return_pct": float(topix_comparison.get("excess_return_pct")) if topix_comparison.get("excess_return_pct") is not None else None,
+                        "annualized_total_return_pct": float(annualized_total_return_pct) if annualized_total_return_pct is not None else None,
+                        "annualized_topix_return_pct": float(annualized_topix_return_pct) if annualized_topix_return_pct is not None else None,
+                        "annualized_excess_return_pct": float(annualized_excess_return_pct) if annualized_excess_return_pct is not None else None,
+                        "holding_years": float(holding_years),
+                        "params_hash": params_hash,
+                        "portfolio_hash": portfolio_hash,
+                    }
+                    print(f"[DEBUG] {json.dumps(debug_info, ensure_ascii=False)}")
+                    sys.stdout.flush()
             else:
                 # エラーが発生した場合は警告を出力
                 skipped_count += 1
@@ -462,23 +547,35 @@ def calculate_longterm_performance(
                 holding_periods.append(holding_years)
                 
                 # 超過リターンも年率化（目的関数用）
-                if excess_return_pct is not None and not pd.isna(excess_return_pct):
-                    # 超過リターンを年率化: (1 + excess_return_pct / 100) ** (1 / holding_years) - 1
-                    # 注意: 累積超過リターンが-100%未満の場合（1 + excess_return_pct/100 < 0）、
-                    #       年率化で複素数が生成される可能性があるため、スキップする
+                # 変更: 年率化してから差を取る方法に統一（avg_annualized_excess_return_pctと一致させるため）
+                # 式: (1+total)^(1/t) - (1+topix)^(1/t)
+                topix_return_pct = topix_comparison.get("topix_return_pct")
+                if topix_return_pct is not None and not pd.isna(topix_return_pct):
+                    # 年率TOPIXリターンを計算
+                    topix_return_factor = 1 + topix_return_pct / 100
+                    if topix_return_factor > 0:
+                        annual_topix_return = topix_return_factor ** (1 / holding_years) - 1
+                        annual_topix_return_pct = annual_topix_return * 100
+                        # 複素数チェック（念のため）
+                        if isinstance(annual_topix_return_pct, complex):
+                            # 複素数の場合はスキップ
+                            print(f"警告: {rebalance_date}の年率TOPIXリターンが複素数になりました。累積TOPIXリターン: {topix_return_pct:.2f}%, 保有期間: {holding_years:.2f}年")
+                        else:
+                            # 年率超過リターン = 年率総リターン - 年率TOPIXリターン
+                            annual_excess_return_pct = annual_return_pct - annual_topix_return_pct
+                            annual_excess_returns.append(annual_excess_return_pct)
+                    else:
+                        # 累積TOPIXリターンが-100%未満の場合はスキップ（年率化不可）
+                        print(f"警告: {rebalance_date}の累積TOPIXリターンが-100%未満のため、年率化をスキップします。累積TOPIXリターン: {topix_return_pct:.2f}%")
+                elif excess_return_pct is not None and not pd.isna(excess_return_pct):
+                    # フォールバック: TOPIXリターンが取得できない場合は、累積超過を年率化（後方互換性のため）
+                    # 注意: 通常は発生しないが、データ欠損の場合のフォールバック
                     excess_factor = 1 + excess_return_pct / 100
                     if excess_factor > 0:
                         annual_excess_return = excess_factor ** (1 / holding_years) - 1
                         annual_excess_return_pct = annual_excess_return * 100
-                        # 複素数チェック（念のため）
-                        if isinstance(annual_excess_return_pct, complex):
-                            # 複素数の場合はスキップ
-                            print(f"警告: {rebalance_date}の年率超過リターンが複素数になりました。累積超過リターン: {excess_return_pct:.2f}%, 保有期間: {holding_years:.2f}年")
-                        else:
+                        if not isinstance(annual_excess_return_pct, complex):
                             annual_excess_returns.append(annual_excess_return_pct)
-                    else:
-                        # 累積超過リターンが-100%未満の場合はスキップ（年率化不可）
-                        print(f"警告: {rebalance_date}の累積超過リターンが-100%未満のため、年率化をスキップします。累積超過リターン: {excess_return_pct:.2f}%")
             
             total_returns.append(total_return_pct)
             # excess_return_pctもNone/NaNチェック（累積値、参考用）
@@ -487,6 +584,8 @@ def calculate_longterm_performance(
     
     # 集計指標を計算
     # 目的関数: 各ポートフォリオの年率超過リターンの平均（TOPIXに対する超過リターン）
+    # 変更: 年率化してから差を取る方法に統一（avg_annualized_excess_return_pctと一致）
+    # 式: mean([(1+total_i/100)^(1/t_i) - 1] - [(1+topix_i/100)^(1/t_i) - 1])
     mean_annual_excess_return = np.mean(annual_excess_returns) if annual_excess_returns else 0.0
     median_annual_excess_return = np.median(annual_excess_returns) if annual_excess_returns else 0.0
     
@@ -524,7 +623,8 @@ def calculate_longterm_performance(
     
     result = {
         # 目的関数用（TOPIXに対する年率超過リターン）
-        "mean_annual_excess_return_pct": mean_annual_excess_return,  # 各ポートフォリオの年率超過リターンの平均
+        # 変更: 年率化してから差を取る方法に統一（avg_annualized_excess_return_pctと一致）
+        "mean_annual_excess_return_pct": mean_annual_excess_return,  # 各ポートフォリオの年率超過リターンの平均（年率化してから差を取る方法）
         "median_annual_excess_return_pct": median_annual_excess_return,  # 中央値
         # 下振れ指標（下振れ罰用）
         "p10_annual_excess_return_pct": p10_annual_excess_return,  # 下位10%の平均超過リターン
@@ -895,7 +995,11 @@ def main(
     print()
     
     # リバランス日を取得
-    rebalance_dates = get_monthly_rebalance_dates(start_date, end_date)
+    # 注意: 24Mホライズンの場合、end_dateは調整されているが、
+    # test_datesの決定にはas_of_date（または元のend_date）を使用する必要がある
+    # そうしないと、train_end_date以降にtest_datesが存在しない可能性がある
+    evaluation_end_date = as_of_date if as_of_date else end_date
+    rebalance_dates = get_monthly_rebalance_dates(start_date, evaluation_end_date)
     print(f"リバランス日数: {len(rebalance_dates)}")
     print(f"最初: {rebalance_dates[0] if rebalance_dates else 'N/A'}")
     print(f"最後: {rebalance_dates[-1] if rebalance_dates else 'N/A'}")
@@ -1168,6 +1272,7 @@ def main(
         horizon_months=horizon_months,
         require_full_horizon=True,  # ホライズン未達の期間を除外
         as_of_date=as_of_date,
+        debug_rebalance_dates={"2023-01-31"} if "2023-01-31" in test_dates else None,  # デバッグ出力
     )
     
     print(f"テストデータ評価結果:")
@@ -1239,6 +1344,15 @@ def main(
             "value": study.best_value,
             "params": study.best_params,
         },
+        # 重要: test_datesとtrain_datesを保存（compare_lambda_penaltiesで使用）
+        "train_dates": train_dates,
+        "test_dates": test_dates,
+        "train_dates_first": train_dates[0] if train_dates else None,
+        "train_dates_last": train_dates[-1] if train_dates else None,
+        "test_dates_first": test_dates[0] if test_dates else None,
+        "test_dates_last": test_dates[-1] if test_dates else None,
+        "num_train_periods": len(train_dates),
+        "num_test_periods": len(test_dates),
         "train_performance": {
             "mean_annual_excess_return_pct": study.best_value,
         },

@@ -62,9 +62,6 @@ from ..backtest.feature_cache import FeatureCache
 # 既存のoptimize.pyから必要な関数をインポート
 from .optimize import (
     EntryScoreParams,
-    _entry_score_with_params,
-    _calculate_entry_score_with_params,
-    _select_portfolio_with_params,
     ProgressWindow,
 )
 
@@ -131,7 +128,7 @@ def run_backtest_for_optimization_timeseries(
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {
                 executor.submit(
-                    _run_single_backtest_portfolio_only,
+                    _select_portfolio_for_rebalance_date,
                     rebalance_date,
                     strategy_params_dict,
                     entry_params_dict,
@@ -152,7 +149,7 @@ def run_backtest_for_optimization_timeseries(
     else:
         # 逐次実行
         for rebalance_date in rebalance_dates:
-            portfolio = _run_single_backtest_portfolio_only(
+            portfolio = _select_portfolio_for_rebalance_date(
                 rebalance_date,
                 strategy_params_dict,
                 entry_params_dict,
@@ -256,7 +253,7 @@ def run_backtest_for_optimization_timeseries(
     return result
 
 
-def _run_single_backtest_portfolio_only(
+def _select_portfolio_for_rebalance_date(
     rebalance_date: str,
     strategy_params_dict: dict,
     entry_params_dict: dict,
@@ -265,6 +262,10 @@ def _run_single_backtest_portfolio_only(
 ) -> Optional[pd.DataFrame]:
     """
     単一のリバランス日に対するポートフォリオ選定のみ（並列化用、キャッシュ対応）
+    
+    【注意】この関数は「ポートフォリオ選定のみ」を行います。パフォーマンス計算は行いません。
+    長期保有型と月次リバランス型の両方で使用可能です。
+    違いは「パフォーマンス計算方法」のみです（長期保有型：固定ホライズン評価、月次リバランス型：月次リターン系列）。
     
     Args:
         rebalance_date: リバランス日
@@ -278,7 +279,7 @@ def _run_single_backtest_portfolio_only(
     """
     try:
         import sys
-        print(f"        [_run_single_backtest] 開始: {rebalance_date}")
+        print(f"        [_select_portfolio] 開始: {rebalance_date}")
         sys.stdout.flush()
         
         # 辞書からdataclassに復元
@@ -287,70 +288,39 @@ def _run_single_backtest_portfolio_only(
         
         # 特徴量を取得（キャッシュ優先）
         if feat is None:
-            print(f"        [_run_single_backtest] DBから特徴量を取得: {rebalance_date}")
+            print(f"        [_select_portfolio] DBから特徴量を取得: {rebalance_date}")
             sys.stdout.flush()
-            # DBから取得
+            # DBから取得（strategy_paramsとentry_paramsを渡してcore_scoreとentry_scoreを計算）
             try:
                 with connect_db(read_only=True) as conn:
-                    feat = build_features(conn, rebalance_date)
+                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
             except sqlite3.OperationalError as e:
                 if "readonly" in str(e).lower() or "read-only" in str(e).lower():
                     with connect_db(read_only=False) as conn:
-                        feat = build_features(conn, rebalance_date)
+                        feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
                 else:
                     raise
         
         if feat is None or feat.empty:
-            print(f"        [_run_single_backtest] ⚠️  特徴量が空: {rebalance_date}")
+            print(f"        [_select_portfolio] ⚠️  特徴量が空: {rebalance_date}")
             sys.stdout.flush()
             return None
         
-        print(f"        [_run_single_backtest] 特徴量取得完了: {rebalance_date} (銘柄数: {len(feat)})")
+        print(f"        [_select_portfolio] 特徴量取得完了: {rebalance_date} (銘柄数: {len(feat)})")
         sys.stdout.flush()
         
-        # entry_scoreを計算（パラメータ化版、価格データはキャッシュから取得）
-        if prices_data is not None:
-            print(f"        [_run_single_backtest] entry_score計算開始 (キャッシュ使用): {rebalance_date}")
-            sys.stdout.flush()
-            # キャッシュから価格データを取得
-            close_map = {
-                code: pd.Series(prices)
-                for code, prices in prices_data.items()
-            }
-            feat["entry_score"] = feat["code"].apply(
-                lambda c: _entry_score_with_params(close_map.get(c), entry_params)
-                if c in close_map
-                else np.nan
-            )
-        else:
-            # DBから価格データを取得
-            price_date = feat["as_of_date"].iloc[0]
-            with connect_db(read_only=True) as conn:
-                prices_win = pd.read_sql_query(
-                    """
-                    SELECT code, date, adj_close
-                    FROM prices_daily
-                    WHERE date <= ?
-                    ORDER BY code, date
-                    """,
-                    conn,
-                    params=(price_date,),
-                )
-            feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
-        
-        # ポートフォリオを選択（パラメータ化版）
-        print(f"        [_run_single_backtest] ポートフォリオ選択開始: {rebalance_date}")
+        # ポートフォリオを選択（等ウェイト：本番運用と同じ）
+        # build_featuresで既にcore_scoreとentry_scoreが計算済みのため、select_portfolioを使用
+        print(f"        [_select_portfolio] ポートフォリオ選択開始: {rebalance_date}")
         sys.stdout.flush()
-        portfolio = _select_portfolio_with_params(
-            feat, strategy_params, entry_params
-        )
+        portfolio = select_portfolio(feat, strategy_params=strategy_params)
         
         if portfolio is None or portfolio.empty:
-            print(f"        [_run_single_backtest] ⚠️  ポートフォリオが空: {rebalance_date}")
+            print(f"        [_select_portfolio] ⚠️  ポートフォリオが空: {rebalance_date}")
             sys.stdout.flush()
             return None
         
-        print(f"        [_run_single_backtest] ✓ 完了: {rebalance_date} (選択銘柄数: {len(portfolio)})")
+        print(f"        [_select_portfolio] ✓ 完了: {rebalance_date} (選択銘柄数: {len(portfolio)})")
         sys.stdout.flush()
         return portfolio
     except Exception as e:

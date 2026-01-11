@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -101,6 +102,7 @@ def run_backtest_with_params_file(
     as_of_date: str,
     require_full_horizon: bool = True,
     rebalance_dates: Optional[List[str]] = None,
+    debug_rebalance_dates: Optional[set] = None,
 ) -> Dict[str, Any]:
     """
     パラメータファイルを使ってバックテストを実行
@@ -246,6 +248,11 @@ def run_backtest_with_params_file(
                     continue
                 
                 # ポートフォリオを選択
+                # デバッグ: どの関数からポートフォリオを作っているかログ出力
+                if debug_rebalance_dates and rebalance_date in debug_rebalance_dates:
+                    print(f"[DEBUG_COMPARE] select_portfolio module: {select_portfolio.__module__}, name: {select_portfolio.__name__}")
+                    print(f"[DEBUG_COMPARE] build_features module: {build_features.__module__}, name: {build_features.__name__}")
+                    sys.stdout.flush()
                 portfolio = select_portfolio(feat, strategy_params=strategy_params)
                 
                 if portfolio.empty:
@@ -333,6 +340,55 @@ def run_backtest_with_params_file(
                 eval_end_used,
             )
             annualized_excess_ret = annualized_ret - annualized_topix_ret
+            
+            # デバッグ出力（指定されたrebalance_dateのみ）
+            if debug_rebalance_dates and rebalance_date in debug_rebalance_dates:
+                # ポートフォリオの銘柄コードと重みを取得
+                selected_codes = list(portfolio.index)
+                weights = [float(row.get("weight", 0.0)) for _, row in portfolio.iterrows()]
+                
+                # 年率化リターンを計算（既に計算済み）
+                annualized_total_return_pct = annualized_ret * 100.0
+                annualized_topix_return_pct = annualized_topix_ret * 100.0
+                annualized_excess_return_pct = annualized_excess_ret * 100.0
+                
+                # 保有期間を計算
+                rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
+                eval_dt = datetime.strptime(eval_end_used, "%Y-%m-%d")
+                holding_years = (eval_dt - rebalance_dt).days / 365.25
+                
+                # params_hashを計算（params辞書をキーソートしてJSON化してハッシュ）
+                params_sorted = dict(sorted(params.items()))
+                params_json = json.dumps(params_sorted, sort_keys=True, ensure_ascii=False)
+                params_hash = hashlib.sha1(params_json.encode('utf-8')).hexdigest()[:8]
+                
+                # portfolio_hashを計算（selected_codes + weightsをソートしてJSON化してハッシュ）
+                portfolio_data = {
+                    "selected_codes": sorted(selected_codes),
+                    "weights": sorted(weights),
+                }
+                portfolio_json = json.dumps(portfolio_data, sort_keys=True, ensure_ascii=False)
+                portfolio_hash = hashlib.sha1(portfolio_json.encode('utf-8')).hexdigest()[:8]
+                
+                # JSONL形式で出力
+                debug_info = {
+                    "rebalance_date": rebalance_date,
+                    "entry_date": rebalance_date,
+                    "exit_date": eval_end_used,
+                    "selected_codes": selected_codes,
+                    "weights": weights,
+                    "total_return_pct": float(total_return_pct) if total_return_pct is not None and not pd.isna(total_return_pct) else None,
+                    "topix_return_pct": float(topix_return_pct) if topix_return_pct is not None and not pd.isna(topix_return_pct) else None,
+                    "excess_return_pct": float(excess_return_pct) if excess_return_pct is not None and not pd.isna(excess_return_pct) else None,
+                    "annualized_total_return_pct": float(annualized_total_return_pct) if annualized_total_return_pct is not None and not pd.isna(annualized_total_return_pct) else None,
+                    "annualized_topix_return_pct": float(annualized_topix_return_pct) if annualized_topix_return_pct is not None and not pd.isna(annualized_topix_return_pct) else None,
+                    "annualized_excess_return_pct": float(annualized_excess_return_pct) if annualized_excess_return_pct is not None and not pd.isna(annualized_excess_return_pct) else None,
+                    "holding_years": float(holding_years),
+                    "params_hash": params_hash,
+                    "portfolio_hash": portfolio_hash,
+                }
+                print(f"[DEBUG_COMPARE] {json.dumps(debug_info, ensure_ascii=False)}")
+                sys.stdout.flush()
             
             performances.append({
                 "rebalance_date": rebalance_date,
@@ -493,6 +549,26 @@ def compare_lambda_penalties(
             best_value = best_trial.get("value", 0.0)
             best_params = best_trial.get("params", {})
             
+            # 重要: optimize_longterm_mainで実際に使われたtest_datesを取得
+            # これにより、test_mean_excess_return_pctとavg_annualized_excess_return_pctが
+            # 同じtest_datesで計算されることを保証する
+            test_dates = optimization_result.get("test_dates")
+            if not test_dates:
+                # 後方互換性: test_datesが保存されていない場合は従来の方法で生成
+                print(f"      [compare_lambda_penalties] ⚠️  警告: 最適化結果にtest_datesが含まれていません。従来の方法で生成します。")
+                all_test_dates = get_monthly_rebalance_dates(start_date, end_date)
+                test_dates = [d for d in all_test_dates if d > train_end_date]
+            
+            if not test_dates:
+                results[f"λ={lambda_val:.2f}"] = {"error": "テスト期間のリバランス日が見つかりません"}
+                continue
+            
+            # test_datesの情報をログ出力（検証用）
+            print(f"      [compare_lambda_penalties] 使用するtest_dates:")
+            print(f"        件数: {len(test_dates)}")
+            print(f"        最初: {test_dates[0] if test_dates else 'N/A'}")
+            print(f"        最後: {test_dates[-1] if test_dates else 'N/A'}")
+            
             # 戦略モードを判定
             strategy_mode = determine_strategy_mode(best_params)
             
@@ -504,16 +580,6 @@ def compare_lambda_penalties(
                 strategy_mode,
                 version,
             )
-            
-            # バックテストを実行（test期間で評価）
-            # test期間: train_end_dateより後（リバランス日ベース）
-            # 注意: train_end_dateより後のリバランス日を取得する必要がある
-            all_test_dates = get_monthly_rebalance_dates(start_date, end_date)
-            test_dates = [d for d in all_test_dates if d > train_end_date]
-            
-            if not test_dates:
-                results[f"λ={lambda_val:.2f}"] = {"error": "テスト期間のリバランス日が見つかりません"}
-                continue
             
             # 固定パラメータモードでバックテストを実行（切替回数は常に0）
             # 注意: 固定パラメータモードでは切替が発生しないため、切替回数は0です
@@ -537,11 +603,15 @@ def compare_lambda_penalties(
                     "best_objective_value": best_value,  # train期間での目的関数値
                     "train_mean_excess_return_pct": train_perf.get("mean_annual_excess_return_pct", 0.0),
                     "test_mean_excess_return_pct": test_perf.get("mean_annual_excess_return_pct", 0.0),
-                    "avg_annualized_excess_return_pct": backtest_result["avg_annualized_excess_return_pct"],  # test期間での平均超過
+                    "avg_annualized_excess_return_pct": backtest_result["avg_annualized_excess_return_pct"],  # test期間での平均超過（test_dates統一後）
                     "p10_excess_return_pct": backtest_result["p10_excess_return_pct"],
                     "win_rate_pct": backtest_result["win_rate_pct"],
                     "switch_count": backtest_result["switch_count"],  # 固定パラメータモードでは常に0
                     "num_periods": backtest_result["num_periods"],
+                    # 重要: test_datesの情報を保存（検証用）
+                    "test_dates_first": test_dates[0] if test_dates else None,
+                    "test_dates_last": test_dates[-1] if test_dates else None,
+                    "num_test_periods": len(test_dates),
                     "params_file_path": str(params_file_path),
                     "optimization_result_file": str(result_file),
                 }

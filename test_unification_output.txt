@@ -1,0 +1,13 @@
+﻿python : Traceback (most recent call last):
+発生場所 C:\Users\takay\AppData\Local\Temp\ps-script-839b09ee-54d0-459e-89b1-311f24dbb3e5.ps1:94 文字:1
++ python test_unification_20230131.py 2>&1 | Out-File -FilePath test_un ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\takay\Dropbox\Tama_code\omanta_3rd\test_unification_20230131.py", line 121, in <module>
+    main()
+  File "C:\Users\takay\Dropbox\Tama_code\omanta_3rd\test_unification_20230131.py", line 40, in main
+    strategy_params = StrategyParams(**params_data["params"]["strategy"])
+                                       ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'strategy'
