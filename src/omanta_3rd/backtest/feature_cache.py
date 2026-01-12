@@ -191,6 +191,18 @@ class FeatureCache:
             if feat is None or feat.empty:
                 return None
             
+            # 重要: entry_scoreとcore_scoreは最適化でtrialごとに異なるparamsで計算されるため、
+            # キャッシュには含めない（削除する）
+            # これにより、_select_portfolio_with_paramsで常に正しいparamsで再計算される
+            # 注意: FeatureCacheではstrategy_paramsとentry_paramsを渡さないため、
+            # デフォルトのPARAMSで計算されたスコアがキャッシュに保存される
+            # 最適化ではtrialごとに異なるparamsが使用されるため、スコアは削除して再計算させる
+            score_columns_to_remove = ["entry_score", "core_score"]
+            removed_columns = [col for col in score_columns_to_remove if col in feat.columns]
+            if removed_columns:
+                feat = feat.drop(columns=removed_columns)
+                print(f"[FeatureCache._build_features_single] スコアを削除しました（{rebalance_date}）: {removed_columns}")
+            
             # 価格データも取得（entry_score計算用）
             # build_features内で使用される価格データを再取得
             # 重要: リバランス日の翌営業日までのデータも含める（購入価格取得用）
@@ -327,6 +339,15 @@ class FeatureCache:
         features_dict = {}
         for rebalance_date, group in combined_features.groupby("rebalance_date"):
             feat = group.drop(columns=["rebalance_date"]).copy()
+            
+            # 重要: 既存キャッシュから読み込んだ場合でも、entry_score/core_scoreを削除
+            # これにより、古いキャッシュ（スコア列が含まれている）でも安全に使用できる
+            score_columns_to_remove = ["entry_score", "core_score"]
+            removed_columns = [col for col in score_columns_to_remove if col in feat.columns]
+            if removed_columns:
+                feat = feat.drop(columns=removed_columns)
+                print(f"[FeatureCache._load_cache] スコアを削除しました（{rebalance_date}）: {removed_columns}")
+            
             features_dict[rebalance_date] = feat
         
         print(f"[FeatureCache] キャッシュ読み込み完了: {len(features_dict)}日分")

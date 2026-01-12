@@ -71,55 +71,69 @@ def _entry_score_with_params(
     """
     from ..jobs.longterm_run import _bb_zscore, _rsi_from_series
     
-    scores = []
-    for n in (20, 60, 90):
+    # 以前の実装: 3つの期間（20日、60日、200日）でBBとRSIの値を計算し、最大値を採用
+    bb_z_values = []
+    rsi_values = []
+    
+    for n in (20, 60, 200):
         z = _bb_zscore(close, n)
         rsi = _rsi_from_series(close, n)
-
-        bb_score = np.nan
-        rsi_score = np.nan
-
+        
         if not pd.isna(z):
-            # 最小幅チェック（分母が0に近くなるのを防ぐ）
-            bb_z_diff = params.bb_z_max - params.bb_z_base
-            if abs(bb_z_diff) >= params.bb_z_min_width:
-                # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
-                # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
-                raw_score = (z - params.bb_z_base) / bb_z_diff
-                # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
-                bb_score = np.clip(raw_score, 0.0, 1.0)
-            else:
-                # 最小幅未満の場合はNaN（無効）
-                bb_score = np.nan
-                
+            bb_z_values.append(z)
         if not pd.isna(rsi):
-            # 最小幅チェック（分母が0に近くなるのを防ぐ）
-            rsi_diff = params.rsi_max - params.rsi_base
-            if abs(rsi_diff) >= params.rsi_min_width:
-                # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
-                # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
-                raw_score = (rsi - params.rsi_base) / rsi_diff
-                # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
-                rsi_score = np.clip(raw_score, 0.0, 1.0)
-            else:
-                # 最小幅未満の場合はNaN（無効）
-                rsi_score = np.nan
-
-        # 重み付き合計
-        total_weight = params.bb_weight + params.rsi_weight
-        if total_weight > 0:
-            if not pd.isna(bb_score) and not pd.isna(rsi_score):
-                scores.append(
-                    (params.bb_weight * bb_score + params.rsi_weight * rsi_score) / total_weight
-                )
-            elif not pd.isna(bb_score):
-                scores.append(bb_score)
-            elif not pd.isna(rsi_score):
-                scores.append(rsi_score)
-
-    if not scores:
+            rsi_values.append(rsi)
+    
+    # BBとRSIの値の最大値を採用（以前の実装）
+    if not bb_z_values and not rsi_values:
         return np.nan
-    return float(np.nanmax(scores))
+    
+    # BB値の最大値を採用（順張りの場合は最大値、逆張りの場合は最小値）
+    # ただし、スコア計算時に順張り/逆張りを考慮するため、ここでは単純に最大値を取る
+    bb_z = np.nanmax(bb_z_values) if bb_z_values else np.nan
+    rsi = np.nanmax(rsi_values) if rsi_values else np.nan
+    
+    # スコア計算
+    bb_score = np.nan
+    rsi_score = np.nan
+
+    if not pd.isna(bb_z):
+        # 最小幅チェック（分母が0に近くなるのを防ぐ）
+        bb_z_diff = params.bb_z_max - params.bb_z_base
+        if abs(bb_z_diff) >= params.bb_z_min_width:
+            # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
+            # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
+            raw_score = (bb_z - params.bb_z_base) / bb_z_diff
+            # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
+            bb_score = np.clip(raw_score, 0.0, 1.0)
+        else:
+            # 最小幅未満の場合はNaN（無効）
+            bb_score = np.nan
+                
+    if not pd.isna(rsi):
+        # 最小幅チェック（分母が0に近くなるのを防ぐ）
+        rsi_diff = params.rsi_max - params.rsi_base
+        if abs(rsi_diff) >= params.rsi_min_width:
+            # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
+            # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
+            raw_score = (rsi - params.rsi_base) / rsi_diff
+            # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
+            rsi_score = np.clip(raw_score, 0.0, 1.0)
+        else:
+            # 最小幅未満の場合はNaN（無効）
+            rsi_score = np.nan
+
+    # 重み付き合計
+    total_weight = params.bb_weight + params.rsi_weight
+    if total_weight > 0:
+        if not pd.isna(bb_score) and not pd.isna(rsi_score):
+            return float((params.bb_weight * bb_score + params.rsi_weight * rsi_score) / total_weight)
+        elif not pd.isna(bb_score):
+            return float(bb_score)
+        elif not pd.isna(rsi_score):
+            return float(rsi_score)
+    
+    return np.nan
 
 
 def _calculate_entry_score_with_params(
@@ -173,34 +187,32 @@ def _select_portfolio_with_params(
     )
     
     # entry_scoreを計算（パラメータ化版）
-    # 注意: _select_portfolio_for_rebalance_date内で既にentry_scoreが計算されている場合はスキップ
-    if "entry_score" not in feat.columns or feat["entry_score"].isna().all():
-        # entry_scoreが存在しない、または全てNaNの場合は計算
-        print(f"        [_select_portfolio] entry_score再計算が必要（DBから価格データ取得）")
-        import sys
-        sys.stdout.flush()
-        
-        # 価格データを取得
-        price_date = feat["as_of_date"].iloc[0]
-        with connect_db() as conn:
-            prices_win = pd.read_sql_query(
-                """
-                SELECT code, date, adj_close
-                FROM prices_daily
-                WHERE date <= ?
-                ORDER BY code, date
-                """,
-                conn,
-                params=(price_date,),
-            )
-        
-        feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
-    else:
-        print(f"        [_select_portfolio] entry_scoreは既に計算済み（スキップ）")
-        import sys
-        sys.stdout.flush()
+    # 重要: 最適化ではtrialごとに異なるentry_paramsが使用されるため、
+    # キャッシュされたentry_scoreは使用しない（常に再計算）
+    # FeatureCacheではentry_scoreを削除しているため、常に再計算される
+    print(f"        [_select_portfolio] entry_scoreを計算します（entry_paramsに基づく）")
+    import sys
+    sys.stdout.flush()
+    
+    # 価格データを取得
+    price_date = feat["as_of_date"].iloc[0]
+    with connect_db() as conn:
+        prices_win = pd.read_sql_query(
+            """
+            SELECT code, date, adj_close
+            FROM prices_daily
+            WHERE date <= ?
+            ORDER BY code, date
+            """,
+            conn,
+            params=(price_date,),
+        )
+    
+    feat = _calculate_entry_score_with_params(feat, prices_win, entry_params)
     
     # フィルタリング
+    # 重要: featを破壊的に変更しないため、必ずcopyを作成
+    # これにより、trial間でfeatが汚染されることを防ぐ
     df = feat.copy()
     
     # Liquidity filter

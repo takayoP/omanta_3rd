@@ -63,6 +63,7 @@ def split_rebalance_dates(
     train_end_date: Optional[str] = None,
     horizon_months: Optional[int] = None,
     require_full_horizon: bool = True,
+    as_of_date: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
     """
     リバランス日を学習/テストに分割（固定ホライズン評価対応）
@@ -79,6 +80,8 @@ def split_rebalance_dates(
         horizon_months: 投資ホライズン（月数、Noneの場合は固定ホライズン制約を適用しない）
         require_full_horizon: 固定ホライズン制約を適用するか（デフォルト: True）
                              Trueの場合、train期間では`eval_end <= train_end_date`を満たすものだけを使用
+        as_of_date: 評価の打ち切り日（YYYY-MM-DD、Noneの場合は制限なし）
+                   24Mホライズンの場合、test_datesを`as_of_date - 24M`以前に制限するために使用
     
     Returns:
         (train_dates, test_dates) のタプル
@@ -117,6 +120,22 @@ def split_rebalance_dates(
             else:
                 train_dates = candidate_train_dates
             
+            # 24Mホライズンの場合、test_datesをas_of_dateで評価可能な範囲に制限
+            # これにより、test期間の評価で「ホライズン未達」が発生しないようにする
+            if horizon_months == 24 and as_of_date and require_full_horizon:
+                as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+                # eval_end <= as_of_date を満たすtest_datesのみを使用
+                # つまり、rebalance_date + 24M <= as_of_date を満たすもの
+                max_rebalance_dt = as_of_dt - relativedelta(months=horizon_months)
+                max_rebalance_date = max_rebalance_dt.strftime("%Y-%m-%d")
+                
+                original_test_count = len(test_dates)
+                test_dates = [d for d in test_dates if d <= max_rebalance_date]
+                
+                if len(test_dates) < original_test_count:
+                    print(f"      [split_rebalance_dates] 24Mホライズンのため、test_datesを{max_rebalance_date}以前に制限しました")
+                    print(f"      元のtest_dates数: {original_test_count} → 制限後: {len(test_dates)}")
+            
             # バリデーション
             if len(train_dates) < 1:
                 if require_full_horizon and horizon_months is not None:
@@ -127,7 +146,19 @@ def split_rebalance_dates(
                 else:
                     raise ValueError(f"No train dates found before or on {train_end_date}")
             if len(test_dates) < 1:
-                raise ValueError(f"No test dates found after {train_end_date}")
+                # 24Mホライズンの場合、test_datesが空になることがあるが、
+                # compare_lambda_penaltiesで別途調整されるため、警告のみ出す
+                if horizon_months == 24 and as_of_date and require_full_horizon:
+                    # max_rebalance_dateを計算
+                    as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+                    max_rebalance_dt = as_of_dt - relativedelta(months=horizon_months)
+                    max_rebalance_date = max_rebalance_dt.strftime("%Y-%m-%d")
+                    print(f"⚠️  警告: test_datesが空です（train_end_date={train_end_date}, as_of_date={as_of_date}, "
+                          f"max_rebalance_date={max_rebalance_date}）。"
+                          f"compare_lambda_penaltiesで別途調整されます。")
+                    # test_datesを空のリストとして返す（エラーにしない）
+                else:
+                    raise ValueError(f"No test dates found after {train_end_date}")
         else:
             # train_ratioを使用（固定ホライズン制約は適用しない）
             n_train = int(round(len(unique_dates) * train_ratio))
@@ -199,7 +230,7 @@ def calculate_longterm_performance(
     sys.stdout.flush()
     
     import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     
     # 並列実行数の決定
     if n_jobs == -1:
@@ -223,10 +254,12 @@ def calculate_longterm_performance(
     sys.stdout.flush()
     
     # 並列実行: ポートフォリオ選定のみ
+    # WindowsでのProcessPoolExecutorの問題を回避するため、ThreadPoolExecutorを使用
     if n_jobs > 1 and len(rebalance_dates) > 1:
-        print(f"      [calculate_longterm_performance] 並列実行モード (max_workers={n_jobs})")
+        print(f"      [calculate_longterm_performance] 並列実行モード (max_workers={n_jobs}, ThreadPoolExecutor)")
         sys.stdout.flush()
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
             futures = {
                 executor.submit(
                     _select_portfolio_for_rebalance_date,
@@ -247,6 +280,21 @@ def calculate_longterm_performance(
                         portfolios[rebalance_date] = portfolio
                 except Exception as e:
                     print(f"エラー ({rebalance_date}): {e}")
+                    # Windowsでの並列処理エラーの場合、逐次実行にフォールバック
+                    if "process pool" in str(e).lower() or "terminated abruptly" in str(e).lower():
+                        print(f"      [calculate_longterm_performance] 並列処理エラーのため、{rebalance_date}を逐次実行します")
+                        try:
+                            portfolio = _select_portfolio_for_rebalance_date(
+                                rebalance_date,
+                                strategy_params_dict,
+                                entry_params_dict,
+                                features_dict.get(rebalance_date) if features_dict else None,
+                                prices_dict.get(rebalance_date) if prices_dict else None,
+                            )
+                            if portfolio is not None and not portfolio.empty:
+                                portfolios[rebalance_date] = portfolio
+                        except Exception as e2:
+                            print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}の逐次実行も失敗: {e2}")
     else:
         # 逐次実行
         print(f"      [calculate_longterm_performance] 逐次実行モード")
@@ -481,10 +529,27 @@ def calculate_longterm_performance(
         # 集計情報を出力
         total_portfolios = len(portfolios)
         evaluated_portfolios = len(performances)
+        
+        # 使用されたポートフォリオの最大eval_endを計算（確認用）
+        max_eval_end_used = None
+        if performances:
+            max_eval_end_dt = None
+            for perf in performances:
+                perf_eval_date = perf.get("as_of_date")  # 実際に使用されたeval_date
+                if perf_eval_date:
+                    perf_eval_dt = datetime.strptime(perf_eval_date, "%Y-%m-%d")
+                    if max_eval_end_dt is None or perf_eval_dt > max_eval_end_dt:
+                        max_eval_end_dt = perf_eval_dt
+            if max_eval_end_dt:
+                max_eval_end_used = max_eval_end_dt.strftime("%Y-%m-%d")
+        
         print(f"      [calculate_longterm_performance] ポートフォリオ評価集計:")
         print(f"        総ポートフォリオ数: {total_portfolios}")
         print(f"        評価成功: {evaluated_portfolios}")
         print(f"        スキップ: {skipped_count}")
+        if max_eval_end_used:
+            print(f"        使用されたポートフォリオの最大eval_end: {max_eval_end_used}")
+        print(f"        as_of_date: {as_of_date}")
         if skipped_reasons:
             print(f"        スキップ理由内訳:")
             for reason, count in skipped_reasons.items():
@@ -689,39 +754,51 @@ def objective_longterm(
     sys.stdout.flush()
     
     # StrategyParamsのパラメータ
-    # 月次リバランスの最適化結果を参考にせず、広い範囲で探索
+    # 意味のある範囲で自由に探索（Study C用に拡張）
     print(f"    [objective_longterm] パラメータ提案開始...")
     sys.stdout.flush()
-    w_quality = trial.suggest_float("w_quality", 0.05, 0.50)
-    print(f"    [objective_longterm] w_quality取得完了: {w_quality}")
-    sys.stdout.flush()
-    w_growth = trial.suggest_float("w_growth", 0.01, 0.30)
-    w_record_high = trial.suggest_float("w_record_high", 0.01, 0.20)
-    w_size = trial.suggest_float("w_size", 0.05, 0.40)
     
     # Study A/B/Cで異なる範囲
     if study_type == "A":
         # Study A: BB寄り・低ROE閾値
+        w_quality = trial.suggest_float("w_quality", 0.05, 0.50)
+        w_growth = trial.suggest_float("w_growth", 0.01, 0.30)
+        w_record_high = trial.suggest_float("w_record_high", 0.01, 0.20)
+        w_size = trial.suggest_float("w_size", 0.05, 0.40)
         w_value = trial.suggest_float("w_value", 0.10, 0.50)
         w_forward_per = trial.suggest_float("w_forward_per", 0.20, 0.90)
         roe_min = trial.suggest_float("roe_min", 0.00, 0.12)
         bb_weight = trial.suggest_float("bb_weight", 0.30, 0.95)
     elif study_type == "B":
         # Study B: Value寄り・ROE閾値やや高め（ただし、より広い範囲で探索）
+        w_quality = trial.suggest_float("w_quality", 0.05, 0.50)
+        w_growth = trial.suggest_float("w_growth", 0.01, 0.30)
+        w_record_high = trial.suggest_float("w_record_high", 0.01, 0.20)
+        w_size = trial.suggest_float("w_size", 0.05, 0.40)
         w_value = trial.suggest_float("w_value", 0.20, 0.60)
         w_forward_per = trial.suggest_float("w_forward_per", 0.20, 0.80)
         roe_min = trial.suggest_float("roe_min", 0.00, 0.20)
         bb_weight = trial.suggest_float("bb_weight", 0.20, 0.80)
     else:  # study_type == "C"
-        # Study C: Study A/B統合・広範囲探索
-        # Study A: w_value(0.10-0.50), Study B: w_value(0.20-0.60) → 統合: 0.10-0.60
-        w_value = trial.suggest_float("w_value", 0.10, 0.60)
-        # Study A: w_forward_per(0.20-0.90), Study B: w_forward_per(0.20-0.80) → 統合: 0.20-0.90
-        w_forward_per = trial.suggest_float("w_forward_per", 0.20, 0.90)
-        # Study A: roe_min(0.00-0.12), Study B: roe_min(0.00-0.20) → 統合: 0.00-0.20
-        roe_min = trial.suggest_float("roe_min", 0.00, 0.20)
-        # Study A: bb_weight(0.30-0.95), Study B: bb_weight(0.20-0.80) → 統合: 0.20-0.95
-        bb_weight = trial.suggest_float("bb_weight", 0.20, 0.95)
+        # Study C: 意味のある範囲で自由に探索（拡張版）
+        # 重みパラメータ（正規化されるため、範囲を広げても実質的な影響は限定的だが、より広い探索を可能にする）
+        w_quality = trial.suggest_float("w_quality", 0.01, 0.70)  # 拡張: 0.05-0.50 → 0.01-0.70
+        w_growth = trial.suggest_float("w_growth", 0.01, 0.50)  # 拡張: 0.01-0.30 → 0.01-0.50
+        w_record_high = trial.suggest_float("w_record_high", 0.01, 0.30)  # 拡張: 0.01-0.20 → 0.01-0.30
+        w_size = trial.suggest_float("w_size", 0.01, 0.60)  # 拡張: 0.05-0.40 → 0.01-0.60
+        w_value = trial.suggest_float("w_value", 0.05, 0.80)  # 拡張: 0.10-0.60 → 0.05-0.80
+        
+        # Value mix（完全に自由に探索）
+        w_forward_per = trial.suggest_float("w_forward_per", 0.0, 1.0)  # 拡張: 0.20-0.90 → 0.0-1.0
+        
+        # ROE閾値（意味のある範囲で拡張）
+        roe_min = trial.suggest_float("roe_min", 0.00, 0.30)  # 拡張: 0.00-0.20 → 0.00-0.30
+        
+        # BB weight（完全に自由に探索）
+        bb_weight = trial.suggest_float("bb_weight", 0.0, 1.0)  # 拡張: 0.20-0.95 → 0.0-1.0
+        
+        print(f"    [objective_longterm] w_quality取得完了: {w_quality}")
+        sys.stdout.flush()
     
     # 正規化（合計が1になるように）
     total = w_quality + w_value + w_growth + w_record_high + w_size
@@ -733,8 +810,13 @@ def objective_longterm(
     
     w_pbr = 1.0 - w_forward_per
     
-    # 共通パラメータ（Study A/B共通、以前と同じ範囲に固定、比較の公平性のため）
-    liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.10, 0.30)
+    # 共通パラメータ
+    if study_type == "C":
+        # Study C: 意味のある範囲で自由に探索
+        liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.05, 0.50)  # 拡張: 0.10-0.30 → 0.05-0.50
+    else:
+        # Study A/B: 以前と同じ範囲に固定、比較の公平性のため
+        liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.10, 0.30)
     
     # RSIパラメータ（順張り/逆張りを対称に探索）
     RSI_LOW, RSI_HIGH = 15.0, 85.0
@@ -937,6 +1019,7 @@ def main(
         as_of_date: Optional[str] = None,
         train_end_date: Optional[str] = None,
         lambda_penalty: float = 0.0,
+        force_rebuild_cache: bool = False,
 ):
     """
     長期保有型の最適化を実行
@@ -1019,7 +1102,53 @@ def main(
             train_end_date=train_end_date,
             horizon_months=horizon_months,  # 固定ホライズン制約
             require_full_horizon=True,  # train期間では`eval_end <= train_end_date`を満たすものだけを使用
+            as_of_date=as_of_date,  # 24Mホライズンの場合、test_datesを制限するために使用
         )
+        
+        # 24Mホライズンの場合、test_datesが空になったら、compare_lambda_penaltiesと同じロジックで再計算
+        if horizon_months == 24 and as_of_date and train_end_date and not test_dates:
+            from datetime import datetime as dt
+            as_of_dt = dt.strptime(as_of_date, "%Y-%m-%d")
+            test_max_dt = as_of_dt - relativedelta(months=24)
+            test_max_date = test_max_dt.strftime("%Y-%m-%d")
+            
+            train_end_dt = dt.strptime(train_end_date, "%Y-%m-%d")
+            train_max_dt = train_end_dt - relativedelta(months=24)
+            train_max_date = train_max_dt.strftime("%Y-%m-%d")
+            
+            # test期間は (train_max_dt, test_max_dt] に限定（train期間と重複しないように）
+            # 注意: 境界の取り扱い（`>` と `<=`）により、train_max_dtと同日のrebalanceは除外される
+            test_dates = []
+            train_max_boundary_dates = []  # 境界確認用
+            for d in rebalance_dates:
+                d_dt = dt.strptime(d, "%Y-%m-%d")
+                if d_dt > train_max_dt and d_dt <= test_max_dt:
+                    test_dates.append(d)
+                # 境界確認: train_max_dtと同日または直後のrebalanceを記録
+                if abs((d_dt - train_max_dt).days) <= 5:  # 5日以内のrebalanceを記録
+                    train_max_boundary_dates.append(d)
+            
+            if test_dates:
+                print(f"⚠️  24Mホライズンのため、test_datesを再計算しました（compare_lambda_penaltiesと同じロジック）")
+                print(f"   train_max_rb (train期間の最終rebalance): {train_max_date}")
+                print(f"   test_max_rb (test期間の最終rebalance): {test_max_date}")
+                print(f"   件数: {len(test_dates)}")
+                print(f"   最初: {test_dates[0] if test_dates else 'N/A'}")
+                print(f"   最後: {test_dates[-1] if test_dates else 'N/A'}")
+                # 境界確認ログ
+                if train_max_boundary_dates:
+                    print(f"   [境界確認] train_max_rb付近のrebalance: {train_max_boundary_dates}")
+                    # train_datesの最終日とtest_datesの最初日が重複していないことを確認
+                    if train_dates and test_dates:
+                        train_last_dt = dt.strptime(train_dates[-1], "%Y-%m-%d")
+                        test_first_dt = dt.strptime(test_dates[0], "%Y-%m-%d")
+                        if train_last_dt >= test_first_dt:
+                            print(f"   ⚠️  警告: train_datesの最終日({train_dates[-1]}) >= test_datesの最初日({test_dates[0]}) - 重複の可能性")
+                        else:
+                            print(f"   ✓ 境界確認OK: train_datesの最終日({train_dates[-1]}) < test_datesの最初日({test_dates[0]})")
+            else:
+                print(f"⚠️  警告: test_datesが空です（train_max_rb: {train_max_date}, test_max_rb: {test_max_date}）。")
+                print(f"   compare_lambda_penaltiesで別途調整されます。")
     except ValueError as e:
         print(f"❌ データ分割エラー: {e}")
         return
@@ -1060,7 +1189,8 @@ def main(
     feature_cache = FeatureCache(cache_dir=cache_dir)
     features_dict, prices_dict = feature_cache.warm(
         rebalance_dates, 
-        n_jobs=bt_workers if bt_workers > 0 else -1
+        n_jobs=bt_workers if bt_workers > 0 else -1,
+        force_rebuild=force_rebuild_cache
     )
     print(f"[FeatureCache] 特徴量: {len(features_dict)}日分、価格データ: {len(prices_dict)}日分")
     print()
@@ -1083,6 +1213,22 @@ def main(
         load_if_exists=True,
         sampler=sampler,
     )
+    
+    # 既存のtrial数を確認（load_if_exists=Trueの場合）
+    existing_trials = len(study.trials)
+    existing_completed = len([t for t in study.trials if t.state == TrialState.COMPLETE])
+    if existing_trials > 0:
+        print(f"既存のstudyを読み込みました（既存trial数: {existing_trials}, 完了: {existing_completed}）")
+        print(f"新規に{n_trials}回の正常計算を追加します（合計目標: {existing_completed + n_trials}回の完了trial）")
+        
+        # 既存の完了trial数が既に目標を超えている場合の警告
+        if existing_completed >= n_trials:
+            print(f"⚠️  警告: 既存の完了trial数（{existing_completed}）が要求数（{n_trials}）を既に超えています。")
+            print(f"   新規の最適化は実行されません。既存の結果を使用します。")
+            print(f"   新しい最適化を実行する場合は、既存のstudyを削除するか、異なるstudy_nameを指定してください。")
+            print()
+        else:
+            print()
     
     # 並列化設定
     import multiprocessing as mp
@@ -1125,25 +1271,38 @@ def main(
         lambda_penalty=lambda_penalty,
     )
     
-    completed_trials = 0
+    # 既存の完了trial数を考慮
+    initial_completed = existing_completed
+    target_completed = initial_completed + n_trials
+    completed_trials = initial_completed
     iteration = 0
     max_iterations = n_trials * 3  # 無限ループ防止（最大3倍まで試行）
     
-    print(f"最適化を開始します（正常に計算が完了したtrial数が{n_trials}に達するまで実行）...")
+    print(f"最適化を開始します（正常に計算が完了したtrial数が{target_completed}に達するまで実行）...")
+    print(f"  既存の完了trial: {initial_completed}回")
+    print(f"  新規に必要な完了trial: {n_trials}回")
+    print()
     
-    while completed_trials < n_trials and iteration < max_iterations:
+    while completed_trials < target_completed and iteration < max_iterations:
         iteration += 1
-        remaining = n_trials - completed_trials
+        remaining = target_completed - completed_trials
+        
+        # 既存の完了trial数が既に目標を超えている場合は、最適化をスキップ
+        if remaining <= 0:
+            print(f"✓ 既存の完了trial数（{completed_trials}）が既に目標（{target_completed}）を満たしています。")
+            print(f"  新規の最適化は実行されません。既存の結果を使用します。")
+            break
         
         # 残りの試行数を実行
-        # 注意: 進捗バーは既存のtrialも含めてカウントするため、ループで複数回呼ぶと表示がずれる
-        # 実行には影響しないが、表示のため最初のループのみ進捗バーを表示
-        show_progress = (iteration == 1)
+        # 注意: 進捗バーは既存のtrialも含めてカウントするため、表示がずれる可能性がある
+        # そのため、進捗バーは表示しない（手動でログを出力する）
+        show_progress = False  # 進捗バーは表示しない（trial番号がずれるため）
         
+        print(f"  新規trialを{remaining}回実行します（iteration {iteration}/{max_iterations}）...")
         study.optimize(
             objective_fn,
             n_trials=remaining,
-            show_progress_bar=show_progress,  # 最初のループのみ進捗バーを表示
+            show_progress_bar=show_progress,
             n_jobs=optuna_n_jobs,
         )
         
@@ -1157,18 +1316,20 @@ def main(
         pruned_count = len([t for t in study.trials if t.state == TrialState.PRUNED])
         fail_count = len([t for t in study.trials if t.state == TrialState.FAIL])
         total_trials = len(study.trials)
+        new_completed = completed_trials - initial_completed
         
-        if completed_trials < n_trials:
-            print(f"  完了trial数: {completed_trials}/{n_trials}（総試行数: {total_trials}, pruned: {pruned_count}, fail: {fail_count}）")
-            print(f"  残り{n_trials - completed_trials}回の正常計算を継続します...")
+        if completed_trials < target_completed:
+            print(f"  完了trial数: {completed_trials}/{target_completed}（新規完了: {new_completed}/{n_trials}, 総試行数: {total_trials}, pruned: {pruned_count}, fail: {fail_count}）")
+            print(f"  残り{target_completed - completed_trials}回の正常計算を継続します...")
     
-    if completed_trials < n_trials:
-        print(f"⚠️  警告: 最大試行回数（{max_iterations}）に達しました。完了trial数: {completed_trials}/{n_trials}")
+    new_completed = completed_trials - initial_completed
+    if completed_trials < target_completed:
+        print(f"⚠️  警告: 最大試行回数（{max_iterations}）に達しました。完了trial数: {completed_trials}/{target_completed}（新規完了: {new_completed}/{n_trials}）")
     
     complete_count = completed_trials
     pruned_count = len([t for t in study.trials if t.state == TrialState.PRUNED])
     total_trials = len(study.trials)
-    print(f"✓ 最適化完了（完了trial数: {completed_trials}/{n_trials}, 総試行数: {total_trials}, pruned: {pruned_count}）")
+    print(f"✓ 最適化完了（完了trial数: {completed_trials}/{target_completed}, 新規完了: {new_completed}/{n_trials}, 総試行数: {total_trials}, pruned: {pruned_count}）")
     
     # 結果表示
     print()
@@ -1261,19 +1422,62 @@ def main(
     )
     
     # テストデータで評価
-    test_perf = calculate_longterm_performance(
-        test_dates,
-        strategy_params,
-        entry_params,
-        cost_bps=cost_bps,
-        n_jobs=backtest_n_jobs,
-        features_dict=features_dict,
-        prices_dict=prices_dict,
-        horizon_months=horizon_months,
-        require_full_horizon=True,  # ホライズン未達の期間を除外
-        as_of_date=as_of_date,
-        debug_rebalance_dates={"2023-01-31"} if "2023-01-31" in test_dates else None,  # デバッグ出力
-    )
+    # 注意: 24Mホライズンの場合、as_of_dateが現在日付に近いとtest期間のポートフォリオが
+    # すべて「ホライズン未達」として除外される可能性がある
+    # しかし、compare_lambda_penaltiesでは別途run_backtest_with_params_fileで評価するため、
+    # ここでのtest評価は参考情報としてのみ使用される
+    if not test_dates:
+        # test_datesが空の場合（24Mホライズンで調整された場合など）、空の結果を返す
+        print("⚠️  test_datesが空のため、test期間の評価をスキップします。")
+        print("    compare_lambda_penaltiesで別途評価されます。")
+        test_perf = {
+            "mean_annual_excess_return_pct": 0.0,
+            "median_annual_excess_return_pct": 0.0,
+            "mean_annual_return_pct": 0.0,
+            "median_annual_return_pct": 0.0,
+            "cumulative_return_pct": 0.0,
+            "mean_excess_return_pct": 0.0,
+            "win_rate": 0.0,
+            "num_portfolios": 0,
+            "mean_holding_years": 0.0,
+            "last_date": as_of_date if as_of_date else end_date,
+        }
+    else:
+        try:
+            test_perf = calculate_longterm_performance(
+                test_dates,
+                strategy_params,
+                entry_params,
+                cost_bps=cost_bps,
+                n_jobs=backtest_n_jobs,
+                features_dict=features_dict,
+                prices_dict=prices_dict,
+                horizon_months=horizon_months,
+                require_full_horizon=True,  # ホライズン未達の期間を除外
+                as_of_date=as_of_date,
+                debug_rebalance_dates={"2023-01-31"} if "2023-01-31" in test_dates else None,  # デバッグ出力
+            )
+        except RuntimeError as e:
+            # test期間の評価が失敗した場合（例：すべてホライズン未達）、
+            # エラーメッセージを表示して空の結果を返す（最適化結果には影響しない）
+            if "No performances were calculated" in str(e):
+                print(f"⚠️  警告: test期間の評価に失敗しました（すべてホライズン未達の可能性）: {e}")
+                print("    最適化結果は正常に完了しています。compare_lambda_penaltiesでは別途評価されます。")
+                test_perf = {
+                    "mean_annual_excess_return_pct": 0.0,
+                    "median_annual_excess_return_pct": 0.0,
+                    "mean_annual_return_pct": 0.0,
+                    "median_annual_return_pct": 0.0,
+                    "cumulative_return_pct": 0.0,
+                    "mean_excess_return_pct": 0.0,
+                    "win_rate": 0.0,
+                    "num_portfolios": 0,
+                    "mean_holding_years": 0.0,
+                    "last_date": as_of_date if as_of_date else end_date,
+                }
+            else:
+                # それ以外のRuntimeErrorはそのまま再発生
+                raise
     
     print(f"テストデータ評価結果:")
     print(f"  年率超過リターン（平均）: {test_perf['mean_annual_excess_return_pct']:.4f}%")
@@ -1421,6 +1625,7 @@ if __name__ == "__main__":
     parser.add_argument("--strategy-mode", type=str, choices=["momentum", "reversal"], default=None, help="戦略モード（Noneの場合は自動判定）")
     parser.add_argument("--as-of-date", type=str, default=None, help="評価の打ち切り日（YYYY-MM-DD、Noneの場合はend_dateを使用）")
     parser.add_argument("--train-end-date", type=str, default=None, help="学習期間の終了日（YYYY-MM-DD、Noneの場合はtrain_ratioを使用）")
+    parser.add_argument("--force-rebuild-cache", action="store_true", help="既存のキャッシュを無視して再構築する")
     
     args = parser.parse_args()
     
@@ -1446,5 +1651,6 @@ if __name__ == "__main__":
         as_of_date=args.as_of_date,
         train_end_date=args.train_end_date,
         lambda_penalty=args.lambda_penalty,
+        force_rebuild_cache=args.force_rebuild_cache,
     )
 
