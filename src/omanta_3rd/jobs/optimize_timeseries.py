@@ -309,11 +309,11 @@ def _select_portfolio_for_rebalance_date(
         print(f"        [_select_portfolio] 特徴量取得完了: {rebalance_date} (銘柄数: {len(feat)})")
         sys.stdout.flush()
         
-        # ポートフォリオを選択（等ウェイト：本番運用と同じ）
-        # build_featuresで既にcore_scoreとentry_scoreが計算済みのため、select_portfolioを使用
+        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
         print(f"        [_select_portfolio] ポートフォリオ選択開始: {rebalance_date}")
         sys.stdout.flush()
-        portfolio = select_portfolio(feat, strategy_params=strategy_params)
+        from ..jobs.optimize import _select_portfolio_with_params
+        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
         
         if portfolio is None or portfolio.empty:
             print(f"        [_select_portfolio] ⚠️  ポートフォリオが空: {rebalance_date}")

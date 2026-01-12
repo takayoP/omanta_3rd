@@ -232,7 +232,8 @@ def run_backtest_with_params_file(
             valid_dates.append(rebalance_date)
     
     # パラメータファイルから直接読み込んだパラメータを使用してポートフォリオを作成
-    from ..jobs.longterm_run import build_features, select_portfolio
+    from ..jobs.longterm_run import build_features
+    from ..jobs.optimize import _select_portfolio_with_params, EntryScoreParams
     from ..infra.db import connect_db
     
     # 各リバランス日でポートフォリオを作成（パラメータファイルから直接読み込んだパラメータを使用）
@@ -247,13 +248,15 @@ def run_backtest_with_params_file(
                     print(f"      [run_backtest_with_params_file] ⚠️  {rebalance_date}: 特徴量が空です")
                     continue
                 
-                # ポートフォリオを選択
+                # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
                 # デバッグ: どの関数からポートフォリオを作っているかログ出力
                 if debug_rebalance_dates and rebalance_date in debug_rebalance_dates:
-                    print(f"[DEBUG_COMPARE] select_portfolio module: {select_portfolio.__module__}, name: {select_portfolio.__name__}")
+                    print(f"[DEBUG_COMPARE] _select_portfolio_with_params module: {_select_portfolio_with_params.__module__}, name: {_select_portfolio_with_params.__name__}")
                     print(f"[DEBUG_COMPARE] build_features module: {build_features.__module__}, name: {build_features.__name__}")
                     sys.stdout.flush()
-                portfolio = select_portfolio(feat, strategy_params=strategy_params)
+                # EntryScoreParamsを構築（パラメータファイルから読み込む）
+                entry_params = EntryScoreParams(**params_data.get("entry", {}))
+                portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
                 
                 if portfolio.empty:
                     print(f"      [run_backtest_with_params_file] ⚠️  {rebalance_date}: ポートフォリオが空です")
@@ -549,25 +552,65 @@ def compare_lambda_penalties(
             best_value = best_trial.get("value", 0.0)
             best_params = best_trial.get("params", {})
             
-            # 重要: optimize_longterm_mainで実際に使われたtest_datesを取得
-            # これにより、test_mean_excess_return_pctとavg_annualized_excess_return_pctが
-            # 同じtest_datesで計算されることを保証する
-            test_dates = optimization_result.get("test_dates")
-            if not test_dates:
-                # 後方互換性: test_datesが保存されていない場合は従来の方法で生成
-                print(f"      [compare_lambda_penalties] ⚠️  警告: 最適化結果にtest_datesが含まれていません。従来の方法で生成します。")
-                all_test_dates = get_monthly_rebalance_dates(start_date, end_date)
-                test_dates = [d for d in all_test_dates if d > train_end_date]
-            
-            if not test_dates:
-                results[f"λ={lambda_val:.2f}"] = {"error": "テスト期間のリバランス日が見つかりません"}
-                continue
-            
-            # test_datesの情報をログ出力（検証用）
-            print(f"      [compare_lambda_penalties] 使用するtest_dates:")
-            print(f"        件数: {len(test_dates)}")
-            print(f"        最初: {test_dates[0] if test_dates else 'N/A'}")
-            print(f"        最後: {test_dates[-1] if test_dates else 'N/A'}")
+            # 24Mホライズンの場合、test期間を手前にずらして、24ヶ月の完全なホライズンで評価できるようにする
+            # （require_full_horizon=Trueを維持するため）
+            if horizon_months == 24:
+                # 24Mホライズンの場合、eval_end <= as_of_dateを満たすrebalanceのみが評価対象となる
+                # つまり、rebalance_date <= as_of_date - 24ヶ月 のrebalanceのみが評価可能
+                # test期間をas_of_date - 24ヶ月以前に設定する必要がある
+                # また、train期間と重複しないように、train_max_rbより後のrebalanceのみをtest期間とする
+                # train_max_rb = train_end_date - 24M (trainに入るrebalanceの最終日)
+                # test_max_rb = as_of_date - 24M (testに入るrebalanceの最終日)
+                # test_rb = (train_max_rb, test_max_rb]
+                as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+                test_max_dt = as_of_dt - relativedelta(months=24)
+                test_max_date = test_max_dt.strftime("%Y-%m-%d")
+                
+                train_end_dt = datetime.strptime(train_end_date, "%Y-%m-%d")
+                train_max_dt = train_end_dt - relativedelta(months=24)
+                train_max_date = train_max_dt.strftime("%Y-%m-%d")
+                
+                # 生成範囲はtest_max_dtまでで十分
+                all_dates = get_monthly_rebalance_dates(start_date, test_max_date)
+                
+                # test期間は (train_max_dt, test_max_dt] に限定（train期間と重複しないように）
+                test_dates = []
+                for d in all_dates:
+                    d_dt = datetime.strptime(d, "%Y-%m-%d")
+                    if d_dt > train_max_dt and d_dt <= test_max_dt:
+                        test_dates.append(d)
+                
+                if not test_dates:
+                    results[f"λ={lambda_val:.2f}"] = {"error": f"24Mホライズン: 評価可能なtest期間のリバランス日が見つかりません（train_max_rb: {train_max_date}, test_max_rb: {test_max_date}）"}
+                    continue
+                
+                print(f"      [compare_lambda_penalties] 24Mホライズン: test期間を調整しました（require_full_horizon=Trueを維持）")
+                print(f"        train_max_rb (train期間の最終rebalance): {train_max_date}")
+                print(f"        test_max_rb (test期間の最終rebalance): {test_max_date}")
+                print(f"        件数: {len(test_dates)}")
+                print(f"        最初: {test_dates[0] if test_dates else 'N/A'}")
+                print(f"        最後: {test_dates[-1] if test_dates else 'N/A'}")
+                print(f"        理由: as_of_date({as_of_date})で24ヶ月の完全なホライズンで評価するため")
+            else:
+                # 12Mホライズンの場合、optimize_longterm_mainで実際に使われたtest_datesを取得
+                # これにより、test_mean_excess_return_pctとavg_annualized_excess_return_pctが
+                # 同じtest_datesで計算されることを保証する
+                test_dates = optimization_result.get("test_dates")
+                if not test_dates:
+                    # 後方互換性: test_datesが保存されていない場合は従来の方法で生成
+                    print(f"      [compare_lambda_penalties] ⚠️  警告: 最適化結果にtest_datesが含まれていません。従来の方法で生成します。")
+                    all_test_dates = get_monthly_rebalance_dates(start_date, end_date)
+                    test_dates = [d for d in all_test_dates if d > train_end_date]
+                
+                if not test_dates:
+                    results[f"λ={lambda_val:.2f}"] = {"error": "テスト期間のリバランス日が見つかりません"}
+                    continue
+                
+                # test_datesの情報をログ出力（検証用）
+                print(f"      [compare_lambda_penalties] 使用するtest_dates:")
+                print(f"        件数: {len(test_dates)}")
+                print(f"        最初: {test_dates[0] if test_dates else 'N/A'}")
+                print(f"        最後: {test_dates[-1] if test_dates else 'N/A'}")
             
             # 戦略モードを判定
             strategy_mode = determine_strategy_mode(best_params)
@@ -589,7 +632,7 @@ def compare_lambda_penalties(
                 test_dates[0],  # 最初のtest期間のリバランス日
                 test_dates[-1],  # 最後のtest期間のリバランス日
                 as_of_date,
-                require_full_horizon=True,
+                require_full_horizon=True,  # 24Mホライズンでもrequire_full_horizon=Trueを維持（test期間を調整済み）
                 rebalance_dates=test_dates,  # test期間のリバランス日を明示的に指定
             )
             

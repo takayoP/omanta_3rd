@@ -17,7 +17,7 @@ from typing import List, Optional
 import pandas as pd
 
 from ..infra.db import connect_db
-from ..jobs.longterm_run import build_features, select_portfolio, save_features, save_portfolio
+from ..jobs.longterm_run import build_features, save_features, save_portfolio
 from ..backtest.performance import calculate_portfolio_performance, save_performance_to_db
 
 
@@ -126,9 +126,24 @@ def run_monthly_portfolio_and_performance(
                 result["error"] = "特徴量が空です"
                 return result
             
-            # 2. ポートフォリオを選択
+            # 2. ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
             print(f"[{rebalance_date}] ポートフォリオを選択中...")
-            portfolio = select_portfolio(feat)
+            # StrategyParamsとEntryScoreParamsを取得（build_featuresで使用したものと同じ）
+            from ..jobs.longterm_run import StrategyParams, PARAMS as DEFAULT_PARAMS
+            from ..jobs.optimize import EntryScoreParams
+            
+            # デフォルトパラメータを使用（本番運用では通常デフォルトパラメータを使用）
+            strategy_params = StrategyParams()
+            # EntryScoreParamsのデフォルト値を使用（rsi_min_widthとbb_z_min_widthはデフォルト値）
+            entry_params = EntryScoreParams(
+                rsi_base=DEFAULT_PARAMS.rsi_base,
+                rsi_max=DEFAULT_PARAMS.rsi_max,
+                bb_z_base=DEFAULT_PARAMS.bb_z_base,
+                bb_z_max=DEFAULT_PARAMS.bb_z_max,
+                bb_weight=DEFAULT_PARAMS.bb_weight,
+                rsi_weight=DEFAULT_PARAMS.rsi_weight,
+            )
+            portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
             
             if portfolio.empty:
                 result["error"] = "ポートフォリオが空です"

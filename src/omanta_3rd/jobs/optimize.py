@@ -304,12 +304,9 @@ def _select_portfolio_with_params(
     if sel_df.empty:
         return pd.DataFrame()
     
-    # Weight calculation
-    total_score = sel_df["core_score"].sum()
-    if total_score > 0:
-        sel_df["weight"] = sel_df["core_score"] / total_score
-    else:
-        sel_df["weight"] = 1.0 / len(sel_df)
+    # Weight calculation: 等ウェイト（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
+    n = len(sel_df)
+    sel_df["weight"] = 1.0 / n
     
     # reasonカラムが存在しない場合は作成
     if "reason" not in sel_df.columns:
@@ -362,8 +359,8 @@ def _run_single_backtest(
         if feat is None or feat.empty:
             return None
         
-        # ポートフォリオを選択（等ウェイト：本番運用と同じ）
-        portfolio = select_portfolio(feat, strategy_params=strategy_params)
+        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
+        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
         
         if portfolio is None or portfolio.empty:
             return None
@@ -448,8 +445,8 @@ def _select_portfolio_for_rebalance_date(
         if feat is None or feat.empty:
             return None
         
-        # ポートフォリオを選択（等ウェイト：本番運用と同じ）
-        portfolio = select_portfolio(feat, strategy_params=strategy_params)
+        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
+        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
         
         if portfolio is None or portfolio.empty:
             return None
