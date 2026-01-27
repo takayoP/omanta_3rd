@@ -53,3 +53,6 @@ ChatGPTの指摘通り、同じパラメータで比較する必要がありま�
 
 これにより、`test_mean_excess_return_pct`と`avg_annualized_excess_return_pct`が同じパラメータで計算され、適切な比較が可能になります。
 
+
+
+

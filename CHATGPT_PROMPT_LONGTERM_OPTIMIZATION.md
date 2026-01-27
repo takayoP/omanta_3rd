@@ -186,3 +186,7 @@ annual_return = (1 + cumulative_return / 100) ** (1 / years) - 1
 
 
 
+
+
+
+

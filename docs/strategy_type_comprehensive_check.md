@@ -98,3 +98,6 @@ portfolio = _run_single_backtest_portfolio_only(...)
 - 長期保有型と月次リバランス型の両方で使用可能
 - 違いは「パフォーマンス計算方法」のみ
 
+
+
+

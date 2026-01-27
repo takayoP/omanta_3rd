@@ -90,3 +90,7 @@ python -m omanta_3rd.jobs.batch_longterm_run_with_regime --start 2020-01-01 --en
 
 
 
+
+
+
+

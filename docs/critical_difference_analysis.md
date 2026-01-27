@@ -68,3 +68,6 @@ pool = f.sort_values("core_score", ascending=False).head(params.pool_size).copy(
 
 `build_features`がどのカラムを返しているか確認する必要があります。
 
+
+
+

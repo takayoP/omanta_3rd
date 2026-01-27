@@ -55,6 +55,56 @@ from .optimize_timeseries import (
 )
 
 
+def _calculate_performance_single_longterm(
+    rebalance_date: str,
+    eval_date: str,
+    portfolio_df_dict: dict,
+) -> Optional[Dict[str, Any]]:
+    """
+    単一のリバランス日に対するパフォーマンス計算のみ（並列化用）
+    
+    Args:
+        rebalance_date: リバランス日
+        eval_date: 評価日
+        portfolio_df_dict: ポートフォリオDataFrameを辞書化したもの（{'index': [...], 'data': {...}}形式）
+    
+    Returns:
+        パフォーマンス指標の辞書、エラー時はNone
+    """
+    try:
+        from ..infra.db import connect_db
+        from ..jobs.longterm_run import save_portfolio
+        from ..backtest.performance import calculate_portfolio_performance
+        import pandas as pd
+        
+        # ポートフォリオDataFrameを復元
+        if '_index' in portfolio_df_dict:
+            index = portfolio_df_dict.pop('_index')
+            portfolio_df = pd.DataFrame.from_dict(portfolio_df_dict, orient='index')
+            portfolio_df.index = index
+        else:
+            portfolio_df = pd.DataFrame.from_dict(portfolio_df_dict, orient='index')
+        
+        # DB接続を各プロセスで作成
+        with connect_db() as conn:
+            # ポートフォリオをDBに保存
+            save_portfolio(conn, portfolio_df)
+            conn.commit()
+            
+            # パフォーマンスを計算
+            perf = calculate_portfolio_performance(rebalance_date, eval_date)
+            if "error" not in perf:
+                return perf
+            else:
+                print(f"      [_calculate_performance_single_longterm] ⚠️  {rebalance_date}のパフォーマンス計算エラー: {perf.get('error')}")
+                return None
+    except Exception as e:
+        print(f"      [_calculate_performance_single_longterm] ⚠️  {rebalance_date}のパフォーマンス計算でエラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def split_rebalance_dates(
     rebalance_dates: List[str],
     train_ratio: float = 0.8,
@@ -254,35 +304,35 @@ def calculate_longterm_performance(
     sys.stdout.flush()
     
     # 並列実行: ポートフォリオ選定のみ
-    # WindowsでのProcessPoolExecutorの問題を回避するため、ThreadPoolExecutorを使用
+    # ProcessPoolExecutorを優先使用（CPU集約的なタスクのため）
+    # Windowsで失敗した場合はThreadPoolExecutorにフォールバック
     if n_jobs > 1 and len(rebalance_dates) > 1:
-        print(f"      [calculate_longterm_performance] 並列実行モード (max_workers={n_jobs}, ThreadPoolExecutor)")
-        sys.stdout.flush()
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {
-                executor.submit(
-                    _select_portfolio_for_rebalance_date,
-                    rebalance_date,
-                    strategy_params_dict,
-                    entry_params_dict,
-                    features_dict.get(rebalance_date) if features_dict else None,
-                    prices_dict.get(rebalance_date) if prices_dict else None,
-                ): rebalance_date
-                for rebalance_date in rebalance_dates
-            }
-            
-            for future in as_completed(futures):
-                rebalance_date = futures[future]
-                try:
-                    portfolio = future.result()
-                    if portfolio is not None and not portfolio.empty:
-                        portfolios[rebalance_date] = portfolio
-                except Exception as e:
-                    print(f"エラー ({rebalance_date}): {e}")
-                    # Windowsでの並列処理エラーの場合、逐次実行にフォールバック
-                    if "process pool" in str(e).lower() or "terminated abruptly" in str(e).lower():
-                        print(f"      [calculate_longterm_performance] 並列処理エラーのため、{rebalance_date}を逐次実行します")
+        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+        try:
+            print(f"      [calculate_longterm_performance] 並列実行モード (max_workers={n_jobs}, ProcessPoolExecutor)")
+            sys.stdout.flush()
+            with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+                futures = {
+                    executor.submit(
+                        _select_portfolio_for_rebalance_date,
+                        rebalance_date,
+                        strategy_params_dict,
+                        entry_params_dict,
+                        features_dict.get(rebalance_date) if features_dict else None,
+                        prices_dict.get(rebalance_date) if prices_dict else None,
+                    ): rebalance_date
+                    for rebalance_date in rebalance_dates
+                }
+                
+                for future in as_completed(futures):
+                    rebalance_date = futures[future]
+                    try:
+                        portfolio = future.result()
+                        if portfolio is not None and not portfolio.empty:
+                            portfolios[rebalance_date] = portfolio
+                    except Exception as e:
+                        print(f"エラー ({rebalance_date}): {e}")
+                        # 逐次実行にフォールバック
                         try:
                             portfolio = _select_portfolio_for_rebalance_date(
                                 rebalance_date,
@@ -295,6 +345,65 @@ def calculate_longterm_performance(
                                 portfolios[rebalance_date] = portfolio
                         except Exception as e2:
                             print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}の逐次実行も失敗: {e2}")
+        except Exception as e:
+            # ProcessPoolExecutorが失敗した場合（Windows等）はThreadPoolExecutorにフォールバック
+            print(f"      [calculate_longterm_performance] ⚠️  ProcessPoolExecutorに失敗、ThreadPoolExecutorに切り替え: {e}")
+            sys.stdout.flush()
+            try:
+                with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                    futures = {
+                        executor.submit(
+                            _select_portfolio_for_rebalance_date,
+                            rebalance_date,
+                            strategy_params_dict,
+                            entry_params_dict,
+                            features_dict.get(rebalance_date) if features_dict else None,
+                            prices_dict.get(rebalance_date) if prices_dict else None,
+                        ): rebalance_date
+                        for rebalance_date in rebalance_dates
+                    }
+                    
+                    for future in as_completed(futures):
+                        rebalance_date = futures[future]
+                        try:
+                            portfolio = future.result()
+                            if portfolio is not None and not portfolio.empty:
+                                portfolios[rebalance_date] = portfolio
+                        except Exception as e2:
+                            print(f"エラー ({rebalance_date}): {e2}")
+                            # 逐次実行にフォールバック
+                            try:
+                                portfolio = _select_portfolio_for_rebalance_date(
+                                    rebalance_date,
+                                    strategy_params_dict,
+                                    entry_params_dict,
+                                    features_dict.get(rebalance_date) if features_dict else None,
+                                    prices_dict.get(rebalance_date) if prices_dict else None,
+                                )
+                                if portfolio is not None and not portfolio.empty:
+                                    portfolios[rebalance_date] = portfolio
+                            except Exception as e3:
+                                print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}の逐次実行も失敗: {e3}")
+            except Exception as e2:
+                # ProcessPoolExecutorとThreadPoolExecutorの両方が失敗した場合は逐次実行
+                print(f"      [calculate_longterm_performance] ⚠️  並列実行に完全に失敗、逐次実行に切り替え: {e2}")
+                sys.stdout.flush()
+                for i, rebalance_date in enumerate(rebalance_dates, 1):
+                    print(f"      [calculate_longterm_performance] 処理中 ({i}/{len(rebalance_dates)}): {rebalance_date}")
+                    sys.stdout.flush()
+                    portfolio = _select_portfolio_for_rebalance_date(
+                        rebalance_date,
+                        strategy_params_dict,
+                        entry_params_dict,
+                        features_dict.get(rebalance_date) if features_dict else None,
+                        prices_dict.get(rebalance_date) if prices_dict else None,
+                    )
+                    if portfolio is not None and not portfolio.empty:
+                        portfolios[rebalance_date] = portfolio
+                        print(f"      [calculate_longterm_performance] ✓ {rebalance_date}完了 (銘柄数: {len(portfolio)})")
+                    else:
+                        print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}は空ポートフォリオ")
+                    sys.stdout.flush()
     else:
         # 逐次実行
         print(f"      [calculate_longterm_performance] 逐次実行モード")
@@ -330,35 +439,29 @@ def calculate_longterm_performance(
     skipped_count = 0
     skipped_reasons = {}
     
+    # 評価の打ち切り日を決定（必須）
+    if as_of_date is None:
+        raise ValueError(
+            "as_of_dateは必須です。未来参照リークを防ぐため、"
+            "必ず明示的に指定してください（例: end_dateを渡す）。"
+        )
+    print(f"      [calculate_longterm_performance] 評価の打ち切り日: {as_of_date}")
+    
+    as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    
+    # horizon_monthsは必須
+    if horizon_months is None:
+        raise ValueError("horizon_monthsは必須です。未来参照リークを防ぐため、明示的に指定してください。")
+    
+    # まず、評価日の計算とスナップ処理を実行（並列化前の前処理）
+    portfolio_tasks = []  # [(rebalance_date, portfolio_df, eval_date), ...]
+    
     with connect_db() as conn:
-        # 評価の打ち切り日を決定（必須）
-        if as_of_date is None:
-            raise ValueError(
-                "as_of_dateは必須です。未来参照リークを防ぐため、"
-                "必ず明示的に指定してください（例: end_dateを渡す）。"
-            )
-        print(f"      [calculate_longterm_performance] 評価の打ち切り日: {as_of_date}")
-        
-        # 価格データの物理的な切り取り（未来参照リーク対策）
-        # prices_dailyをas_of_dateで切る（SQL取得段階でWHERE date <= as_of_dateを強制）
-        # 注意: この時点ではまだ価格データを取得していないが、
-        # calculate_portfolio_performance内で取得する際にas_of_dateを考慮する必要がある
-        
-        as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
-        
-        # horizon_monthsは必須
-        if horizon_months is None:
-            raise ValueError("horizon_monthsは必須です。未来参照リークを防ぐため、明示的に指定してください。")
-        
-        # 評価日を決定（固定ホライズン評価）
-        
         for rebalance_date in sorted(portfolios.keys()):
-            # ポートフォリオをDBに一時保存（calculate_portfolio_performanceがDBから読み込むため）
             portfolio_df = portfolios[rebalance_date]
             
             # デバッグ: ポートフォリオの銘柄数を確認
             if len(portfolio_df) == 0:
-                print(f"警告: {rebalance_date}のポートフォリオが空です")
                 skipped_count += 1
                 skipped_reasons["空ポートフォリオ"] = skipped_reasons.get("空ポートフォリオ", 0) + 1
                 continue
@@ -378,7 +481,6 @@ def calculate_longterm_performance(
                     continue
             
             # eval_end_dateとas_of_dateのうち、早い方を使用（安全のため）
-            # 注意: require_full_horizon=Trueなら実質eval_end_date（as_of_date >= eval_end_dateが保証されている）
             eval_date = min(eval_end_date, as_of_date)
             
             # require_full_horizon=Trueの場合は、固定ホライズン評価を保証するためのアサーション
@@ -388,13 +490,9 @@ def calculate_longterm_performance(
                     f"This should not happen if require_full_horizon check passed."
                 )
             
-            # eval_dateを営業日にスナップ（非営業日の場合は前営業日を使用）
-            # 規約: eval_dateが非営業日の場合は、その日以前の最新の営業日を使用
-            # 重要: スナップ関数の引数はeval_date（=eval_end_date）である必要がある（固定ホライズンを守るため）
+            # eval_dateを営業日にスナップ
             try:
                 eval_date_snapped = _snap_price_date(conn, eval_date)
-                
-                # スナップ差分が大きい場合（データ欠損で数週間〜数ヶ月戻るケース）は除外（ChatGPT推奨）
                 eval_dt = datetime.strptime(eval_date, "%Y-%m-%d")
                 eval_snapped_dt = datetime.strptime(eval_date_snapped, "%Y-%m-%d")
                 snap_diff_days = (eval_dt - eval_snapped_dt).days
@@ -418,142 +516,272 @@ def calculate_longterm_performance(
             holding_years = (datetime.strptime(eval_date, "%Y-%m-%d") - rebalance_dt).days / 365.25
             print(f"      [calculate_longterm_performance] {rebalance_date} → eval_end={eval_date} (holding={holding_years:.2f}年, horizon={horizon_months}M)")
             
-            save_portfolio(conn, portfolio_df)
-            # 重要: 別の接続から読み込む前にコミットが必要
-            conn.commit()
+            # ポートフォリオDataFrameを辞書化（pickle可能にするため）
+            portfolio_df_dict = portfolio_df.to_dict(orient='index')
+            # indexも保存
+            portfolio_df_dict['_index'] = list(portfolio_df.index)
             
-            # パフォーマンスを計算
-            perf = calculate_portfolio_performance(rebalance_date, eval_date)
-            if "error" not in perf:
-                performances.append(perf)
-                
-                # デバッグ出力（指定されたrebalance_dateのみ）
-                if debug_rebalance_dates and rebalance_date in debug_rebalance_dates:
-                    # ポートフォリオの銘柄コードと重みを取得
-                    selected_codes = list(portfolio_df.index)
-                    weights = [float(row.get("weight", 0.0)) for _, row in portfolio_df.iterrows()]
-                    
-                    # 年率化リターンを計算（保有期間を計算）
-                    rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
-                    eval_dt = datetime.strptime(eval_date, "%Y-%m-%d")
-                    holding_years = (eval_dt - rebalance_dt).days / 365.25
-                    
-                    total_return_pct = perf.get("total_return_pct")
-                    topix_comparison = perf.get("topix_comparison", {})
-                    topix_return_pct = topix_comparison.get("topix_return_pct")
-                    
-                    annualized_total_return_pct = None
-                    annualized_topix_return_pct = None
-                    annualized_excess_return_pct = None
-                    
-                    if total_return_pct is not None and not pd.isna(total_return_pct) and holding_years > 0:
-                        return_factor = 1 + total_return_pct / 100
-                        if return_factor > 0:
-                            annualized_total_return = return_factor ** (1 / holding_years) - 1
-                            annualized_total_return_pct = annualized_total_return * 100
-                            
-                            if topix_return_pct is not None and not pd.isna(topix_return_pct):
-                                topix_return_factor = 1 + topix_return_pct / 100
-                                if topix_return_factor > 0:
-                                    annualized_topix_return = topix_return_factor ** (1 / holding_years) - 1
-                                    annualized_topix_return_pct = annualized_topix_return * 100
-                                    annualized_excess_return_pct = annualized_total_return_pct - annualized_topix_return_pct
-                    
-                    # params_hashを計算（strategy_paramsとentry_paramsを統合してハッシュ）
-                    # compare側と同じ方式: params辞書をキーソートしてJSON化してハッシュ
-                    params_dict = {
-                        "w_quality": strategy_params.w_quality,
-                        "w_value": strategy_params.w_value,
-                        "w_growth": strategy_params.w_growth,
-                        "w_record_high": strategy_params.w_record_high,
-                        "w_size": strategy_params.w_size,
-                        "w_forward_per": strategy_params.w_forward_per,
-                        "w_pbr": strategy_params.w_pbr,
-                        "roe_min": strategy_params.roe_min,
-                        "liquidity_quantile_cut": strategy_params.liquidity_quantile_cut,
-                        "rsi_base": entry_params.rsi_base,
-                        "rsi_max": entry_params.rsi_max,
-                        "bb_z_base": entry_params.bb_z_base,
-                        "bb_z_max": entry_params.bb_z_max,
-                        "bb_weight": entry_params.bb_weight,
-                        "rsi_weight": entry_params.rsi_weight,
-                        "rsi_min_width": entry_params.rsi_min_width,
-                        "bb_z_min_width": entry_params.bb_z_min_width,
+            portfolio_tasks.append((rebalance_date, portfolio_df_dict, eval_date))
+    
+    # パフォーマンス計算を並列実行
+    if len(portfolio_tasks) == 0:
+        print(f"      [calculate_longterm_performance] ⚠️  パフォーマンス計算対象が0件です")
+    else:
+        perf_n_jobs = min(len(portfolio_tasks), n_jobs) if n_jobs > 1 else 1
+        if perf_n_jobs > 1 and len(portfolio_tasks) > 1:
+            print(f"      [calculate_longterm_performance] パフォーマンス計算を並列実行 (max_workers={perf_n_jobs}, ProcessPoolExecutor)")
+            sys.stdout.flush()
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            
+            try:
+                with ProcessPoolExecutor(max_workers=perf_n_jobs) as executor:
+                    futures = {
+                        executor.submit(
+                            _calculate_performance_single_longterm,
+                            rebalance_date,
+                            eval_date,
+                            portfolio_df_dict,
+                        ): rebalance_date
+                        for rebalance_date, portfolio_df_dict, eval_date in portfolio_tasks
                     }
-                    params_sorted = dict(sorted(params_dict.items()))
-                    params_json = json.dumps(params_sorted, sort_keys=True, ensure_ascii=False)
-                    params_hash = hashlib.sha1(params_json.encode('utf-8')).hexdigest()[:8]
                     
-                    # portfolio_hashを計算（selected_codes + weightsをソートしてJSON化してハッシュ）
-                    portfolio_data = {
-                        "selected_codes": sorted(selected_codes),
-                        "weights": sorted(weights),
-                    }
-                    portfolio_json = json.dumps(portfolio_data, sort_keys=True, ensure_ascii=False)
-                    portfolio_hash = hashlib.sha1(portfolio_json.encode('utf-8')).hexdigest()[:8]
-                    
-                    # JSONL形式で出力
-                    debug_info = {
-                        "rebalance_date": rebalance_date,
-                        "entry_date": rebalance_date,
-                        "exit_date": eval_date,
-                        "selected_codes": selected_codes,
-                        "weights": weights,
-                        "total_return_pct": float(total_return_pct) if total_return_pct is not None and not pd.isna(total_return_pct) else None,
-                        "topix_return_pct": float(topix_return_pct) if topix_return_pct is not None and not pd.isna(topix_return_pct) else None,
-                        "excess_return_pct": float(topix_comparison.get("excess_return_pct")) if topix_comparison.get("excess_return_pct") is not None else None,
-                        "annualized_total_return_pct": float(annualized_total_return_pct) if annualized_total_return_pct is not None else None,
-                        "annualized_topix_return_pct": float(annualized_topix_return_pct) if annualized_topix_return_pct is not None else None,
-                        "annualized_excess_return_pct": float(annualized_excess_return_pct) if annualized_excess_return_pct is not None else None,
-                        "holding_years": float(holding_years),
-                        "params_hash": params_hash,
-                        "portfolio_hash": portfolio_hash,
-                    }
-                    print(f"[DEBUG] {json.dumps(debug_info, ensure_ascii=False)}")
-                    sys.stdout.flush()
+                    for future in as_completed(futures):
+                        rebalance_date = futures[future]
+                        try:
+                            perf = future.result()
+                            if perf is not None:
+                                performances.append(perf)
+                        except Exception as e:
+                            print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}のパフォーマンス計算でエラー: {e}")
+                            skipped_count += 1
+                            skipped_reasons["パフォーマンス計算エラー"] = skipped_reasons.get("パフォーマンス計算エラー", 0) + 1
+            except Exception as e:
+                # ProcessPoolExecutorが失敗した場合（Windows等）は逐次実行にフォールバック
+                print(f"      [calculate_longterm_performance] ⚠️  並列実行に失敗したため、逐次実行に切り替えます: {e}")
+                sys.stdout.flush()
+                for rebalance_date, portfolio_df_dict, eval_date in portfolio_tasks:
+                    try:
+                        perf = _calculate_performance_single_longterm(rebalance_date, eval_date, portfolio_df_dict)
+                        if perf is not None:
+                            performances.append(perf)
+                    except Exception as e2:
+                        print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}のパフォーマンス計算でエラー: {e2}")
+                        skipped_count += 1
+                        skipped_reasons["パフォーマンス計算エラー"] = skipped_reasons.get("パフォーマンス計算エラー", 0) + 1
+        else:
+            # 逐次実行
+            print(f"      [calculate_longterm_performance] パフォーマンス計算を逐次実行")
+            sys.stdout.flush()
+            for rebalance_date, portfolio_df_dict, eval_date in portfolio_tasks:
+                try:
+                    perf = _calculate_performance_single_longterm(rebalance_date, eval_date, portfolio_df_dict)
+                    if perf is not None:
+                        performances.append(perf)
+                except Exception as e:
+                    print(f"      [calculate_longterm_performance] ⚠️  {rebalance_date}のパフォーマンス計算でエラー: {e}")
+                    skipped_count += 1
+                    skipped_reasons["パフォーマンス計算エラー"] = skipped_reasons.get("パフォーマンス計算エラー", 0) + 1
+    
+    # デバッグ出力（指定されたrebalance_dateのみ）
+    if debug_rebalance_dates and len(performances) > 0:
+        # rebalance_dateからeval_dateを取得するためのマッピングを作成
+        rebalance_to_eval = {rd: ed for rd, _, ed in portfolio_tasks}
+        
+        for perf in performances:
+            rebalance_date = perf.get("rebalance_date")
+            if rebalance_date in debug_rebalance_dates:
+                eval_date = rebalance_to_eval.get(rebalance_date)
+                if eval_date:
+                    portfolio_df = portfolios.get(rebalance_date)
+                    if portfolio_df is not None:
+                        selected_codes = list(portfolio_df.index)
+                        weights = [float(row.get("weight", 0.0)) for _, row in portfolio_df.iterrows()]
+                        
+                        # 年率化リターンを計算
+                        rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
+                        eval_dt = datetime.strptime(eval_date, "%Y-%m-%d")
+                        holding_years = (eval_dt - rebalance_dt).days / 365.25
+                        
+                        total_return_pct = perf.get("total_return_pct")
+                        topix_comparison = perf.get("topix_comparison", {})
+                        topix_return_pct = topix_comparison.get("topix_return_pct")
+                        
+                        annualized_total_return_pct = None
+                        annualized_topix_return_pct = None
+                        annualized_excess_return_pct = None
+                        
+                        if total_return_pct is not None and not pd.isna(total_return_pct) and holding_years > 0:
+                            return_factor = 1 + total_return_pct / 100
+                            if return_factor > 0:
+                                annualized_total_return = return_factor ** (1 / holding_years) - 1
+                                annualized_total_return_pct = annualized_total_return * 100
+                                
+                                if topix_return_pct is not None and not pd.isna(topix_return_pct):
+                                    topix_return_factor = 1 + topix_return_pct / 100
+                                    if topix_return_factor > 0:
+                                        annualized_topix_return = topix_return_factor ** (1 / holding_years) - 1
+                                        annualized_topix_return_pct = annualized_topix_return * 100
+                                        annualized_excess_return_pct = annualized_total_return_pct - annualized_topix_return_pct
+                        
+                        # params_hashを計算
+                        params_dict = {
+                            "w_quality": strategy_params.w_quality,
+                            "w_value": strategy_params.w_value,
+                            "w_growth": strategy_params.w_growth,
+                            "w_record_high": strategy_params.w_record_high,
+                            "w_size": strategy_params.w_size,
+                            "w_forward_per": strategy_params.w_forward_per,
+                            "w_pbr": strategy_params.w_pbr,
+                            "roe_min": strategy_params.roe_min,
+                            "liquidity_quantile_cut": strategy_params.liquidity_quantile_cut,
+                            "rsi_base": entry_params.rsi_base,
+                            "rsi_max": entry_params.rsi_max,
+                            "bb_z_base": entry_params.bb_z_base,
+                            "bb_z_max": entry_params.bb_z_max,
+                            "bb_weight": entry_params.bb_weight,
+                            "rsi_weight": entry_params.rsi_weight,
+                            "rsi_min_width": entry_params.rsi_min_width,
+                            "bb_z_min_width": entry_params.bb_z_min_width,
+                        }
+                        params_sorted = dict(sorted(params_dict.items()))
+                        params_json = json.dumps(params_sorted, sort_keys=True, ensure_ascii=False)
+                        params_hash = hashlib.sha1(params_json.encode('utf-8')).hexdigest()[:8]
+                        
+                        # portfolio_hashを計算
+                        portfolio_data = {
+                            "selected_codes": sorted(selected_codes),
+                            "weights": sorted(weights),
+                        }
+                        portfolio_json = json.dumps(portfolio_data, sort_keys=True, ensure_ascii=False)
+                        portfolio_hash = hashlib.sha1(portfolio_json.encode('utf-8')).hexdigest()[:8]
+                        
+                        # JSONL形式で出力
+                        debug_info = {
+                            "rebalance_date": rebalance_date,
+                            "entry_date": rebalance_date,
+                            "exit_date": eval_date,
+                            "selected_codes": selected_codes,
+                            "weights": weights,
+                            "total_return_pct": float(total_return_pct) if total_return_pct is not None and not pd.isna(total_return_pct) else None,
+                            "topix_return_pct": float(topix_return_pct) if topix_return_pct is not None and not pd.isna(topix_return_pct) else None,
+                            "excess_return_pct": float(topix_comparison.get("excess_return_pct")) if topix_comparison.get("excess_return_pct") is not None else None,
+                            "annualized_total_return_pct": float(annualized_total_return_pct) if annualized_total_return_pct is not None else None,
+                            "annualized_topix_return_pct": float(annualized_topix_return_pct) if annualized_topix_return_pct is not None else None,
+                            "annualized_excess_return_pct": float(annualized_excess_return_pct) if annualized_excess_return_pct is not None else None,
+                            "holding_years": float(holding_years),
+                            "params_hash": params_hash,
+                            "portfolio_hash": portfolio_hash,
+                        }
+                        print(f"[DEBUG] {json.dumps(debug_info, ensure_ascii=False)}")
+                        sys.stdout.flush()
+    
+    # 最適化中は一時的なポートフォリオなので削除（クリーンアップ）
+    # 注意: 本番運用時は削除しない
+    if len(portfolio_tasks) > 0:
+        with connect_db() as conn:
+            for rebalance_date, _, _ in portfolio_tasks:
+                conn.execute(
+                    "DELETE FROM portfolio_monthly WHERE rebalance_date = ?",
+                    (rebalance_date,)
+                )
+            conn.commit()
+    
+    # 集計情報を出力
+    total_portfolios = len(portfolios)
+    evaluated_portfolios = len(performances)
+    
+    # 使用されたポートフォリオの最大eval_endを計算（確認用）
+    max_eval_end_used = None
+    if performances:
+        max_eval_end_dt = None
+        for perf in performances:
+            perf_eval_date = perf.get("as_of_date")  # 実際に使用されたeval_date
+            if perf_eval_date:
+                perf_eval_dt = datetime.strptime(perf_eval_date, "%Y-%m-%d")
+                if max_eval_end_dt is None or perf_eval_dt > max_eval_end_dt:
+                    max_eval_end_dt = perf_eval_dt
+        if max_eval_end_dt:
+            max_eval_end_used = max_eval_end_dt.strftime("%Y-%m-%d")
+    
+    # チェックA: 固定ホライズン評価の確認（各ポートフォリオの詳細情報を出力）
+    print(f"      [calculate_longterm_performance] ポートフォリオ評価集計:")
+    print(f"        総ポートフォリオ数: {total_portfolios}")
+    print(f"        評価成功: {evaluated_portfolios}")
+    print(f"        スキップ: {skipped_count}")
+    if max_eval_end_used:
+        print(f"        使用されたポートフォリオの最大eval_end: {max_eval_end_used}")
+    print(f"        as_of_date: {as_of_date}")
+    if skipped_reasons:
+        print(f"        スキップ理由内訳:")
+        for reason, count in skipped_reasons.items():
+            print(f"          - {reason}: {count}件")
+    
+    # チェックA: 各ポートフォリオのrebalance_date, eval_end_date, holding_yearsを出力
+    print(f"      [calculate_longterm_performance] 【チェックA】固定ホライズン評価の確認:")
+    print(f"        rebalance_date | eval_end_date | holding_years | 備考")
+    print(f"        " + "-" * 70)
+    rebalance_to_eval = {rd: ed for rd, _, ed in portfolio_tasks}
+    for perf in sorted(performances, key=lambda p: p.get("rebalance_date", "")):
+        rebalance_date = perf.get("rebalance_date")
+        eval_date_used = perf.get("as_of_date")  # 実際に使用されたeval_date
+        eval_end_expected = rebalance_to_eval.get(rebalance_date)  # 期待されるeval_end_date（rebalance_date + horizon_months）
+        
+        if rebalance_date and eval_date_used:
+            rebalance_dt = datetime.strptime(rebalance_date, "%Y-%m-%d")
+            eval_dt = datetime.strptime(eval_date_used, "%Y-%m-%d")
+            holding_years = (eval_dt - rebalance_dt).days / 365.25
+            
+            # 期待されるeval_end_dateと実際のeval_dateが一致するか確認
+            if eval_end_expected:
+                eval_end_expected_dt = datetime.strptime(eval_end_expected, "%Y-%m-%d")
+                if eval_date_used == eval_end_expected:
+                    status = "✓ 固定ホライズン"
+                else:
+                    status = f"⚠️ 不一致 (期待: {eval_end_expected})"
             else:
-                # エラーが発生した場合は警告を出力
-                skipped_count += 1
-                error_msg = perf.get('error', 'Unknown error')
-                skipped_reasons[f"計算エラー: {error_msg}"] = skipped_reasons.get(f"計算エラー: {error_msg}", 0) + 1
-                print(f"警告: {rebalance_date}のパフォーマンス計算でエラーが発生しました: {error_msg}")
+                status = "⚠️ eval_end不明"
             
-            # 最適化中は一時的なポートフォリオなので削除（クリーンアップ）
-            # 注意: 本番運用時は削除しない
-            conn.execute(
-                "DELETE FROM portfolio_monthly WHERE rebalance_date = ?",
-                (rebalance_date,)
-            )
-            conn.commit()
-        
-        # 集計情報を出力
-        total_portfolios = len(portfolios)
-        evaluated_portfolios = len(performances)
-        
-        # 使用されたポートフォリオの最大eval_endを計算（確認用）
-        max_eval_end_used = None
-        if performances:
-            max_eval_end_dt = None
-            for perf in performances:
-                perf_eval_date = perf.get("as_of_date")  # 実際に使用されたeval_date
-                if perf_eval_date:
-                    perf_eval_dt = datetime.strptime(perf_eval_date, "%Y-%m-%d")
-                    if max_eval_end_dt is None or perf_eval_dt > max_eval_end_dt:
-                        max_eval_end_dt = perf_eval_dt
-            if max_eval_end_dt:
-                max_eval_end_used = max_eval_end_dt.strftime("%Y-%m-%d")
-        
-        print(f"      [calculate_longterm_performance] ポートフォリオ評価集計:")
-        print(f"        総ポートフォリオ数: {total_portfolios}")
-        print(f"        評価成功: {evaluated_portfolios}")
-        print(f"        スキップ: {skipped_count}")
-        if max_eval_end_used:
-            print(f"        使用されたポートフォリオの最大eval_end: {max_eval_end_used}")
+            print(f"        {rebalance_date} | {eval_date_used} | {holding_years:.2f}年 | {status}")
+    
+    # チェックB: train側で未来リークしていないか確認
+    # 注意: rebalance_datesは関数の引数として利用可能
+    if as_of_date:
+        as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+        print(f"      [calculate_longterm_performance] 【チェックB】未来リーク確認:")
         print(f"        as_of_date: {as_of_date}")
-        if skipped_reasons:
-            print(f"        スキップ理由内訳:")
-            for reason, count in skipped_reasons.items():
-                print(f"          - {reason}: {count}件")
+        print(f"        horizon_months: {horizon_months}")
+        print(f"        require_full_horizon: {require_full_horizon}")
+        
+        # 評価に使われたポートフォリオのrebalance_dateを確認
+        used_rebalance_dates = [p.get("rebalance_date") for p in performances if p.get("rebalance_date")]
+        if used_rebalance_dates:
+            latest_rebalance = max(used_rebalance_dates)
+            latest_rebalance_dt = datetime.strptime(latest_rebalance, "%Y-%m-%d")
+            expected_max_eval = latest_rebalance_dt + relativedelta(months=horizon_months)
+            
+            print(f"        評価に使用された最新のrebalance_date: {latest_rebalance}")
+            print(f"        期待される最大eval_end: {expected_max_eval.strftime('%Y-%m-%d')}")
+            
+            if expected_max_eval <= as_of_dt:
+                print(f"        ✓ 未来リークなし（期待される最大eval_end <= as_of_date）")
+            else:
+                print(f"        ⚠️  警告: 期待される最大eval_end > as_of_date（未来リークの可能性）")
+            
+            # train期間の終盤（最後の10%）が評価に使われているか確認
+            # rebalance_datesは関数の引数として利用可能
+            if len(rebalance_dates) > 0:
+                sorted_dates = sorted(rebalance_dates)
+                train_cutoff_idx = int(len(sorted_dates) * 0.9)  # 最後の10%
+                train_cutoff_date = sorted_dates[train_cutoff_idx] if train_cutoff_idx < len(sorted_dates) else sorted_dates[-1]
+                train_cutoff_dt = datetime.strptime(train_cutoff_date, "%Y-%m-%d")
+                
+                late_train_portfolios = [rd for rd in used_rebalance_dates if datetime.strptime(rd, "%Y-%m-%d") >= train_cutoff_dt]
+                if late_train_portfolios:
+                    print(f"        ⚠️  警告: train期間の終盤（{train_cutoff_date}以降）のポートフォリオが評価に使用されています:")
+                    for rd in sorted(late_train_portfolios):
+                        print(f"          - {rd}")
+                else:
+                    print(f"        ✓ train期間の終盤は評価に使用されていません（未来リークなし）")
     
     if not performances:
         raise RuntimeError(
@@ -691,6 +919,7 @@ def calculate_longterm_performance(
         # 変更: 年率化してから差を取る方法に統一（avg_annualized_excess_return_pctと一致）
         "mean_annual_excess_return_pct": mean_annual_excess_return,  # 各ポートフォリオの年率超過リターンの平均（年率化してから差を取る方法）
         "median_annual_excess_return_pct": median_annual_excess_return,  # 中央値
+        "annual_excess_returns_list": annual_excess_returns,  # 個別の年率超過リターンリスト（trimmed_mean用）
         # 下振れ指標（下振れ罰用）
         "p10_annual_excess_return_pct": p10_annual_excess_return,  # 下位10%の平均超過リターン
         "p25_annual_excess_return_pct": p25_annual_excess_return,  # 下位25%の平均超過リターン
@@ -729,6 +958,7 @@ def objective_longterm(
     require_full_horizon: bool = True,
     as_of_date: Optional[str] = None,
     lambda_penalty: float = 0.0,
+    objective_type: str = "mean",  # "mean", "median", "trimmed_mean"
 ) -> float:
     """
     Optunaの目的関数（長期保有型）
@@ -822,8 +1052,9 @@ def objective_longterm(
     RSI_LOW, RSI_HIGH = 15.0, 85.0
     rsi_min_width = 10.0  # 最小幅制約（緩和: 20.0 → 10.0）
     
-    # baseを先にサンプリング
-    rsi_base = trial.suggest_float("rsi_base", RSI_LOW, RSI_HIGH)
+    # baseを先にサンプリング（空レンジ対策: baseの範囲を制限）
+    # 両方向が常に可能になるように、baseの範囲を[min_width, HIGH-min_width]に制限
+    rsi_base = trial.suggest_float("rsi_base", RSI_LOW + rsi_min_width, RSI_HIGH - rsi_min_width)
     
     # baseに対して制約を満たすmaxの範囲を計算
     # maxは base ± min_width の範囲外から選ぶ必要がある
@@ -834,23 +1065,27 @@ def objective_longterm(
     can_long = (max_low <= RSI_HIGH)  # 順張り方向が可能か
     can_short = (max_high >= RSI_LOW)  # 逆張り方向が可能か
     
+    # baseの範囲を制限したので、通常は両方向が可能（空レンジ対策済み）
+    # 念のため、方向が1つしかない場合も処理
     if can_long and can_short:
-        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+        # 両方向が可能な場合: categoricalパラメータで方向を選ぶ（再現性向上）
         # 順張り方向: [base + min_width, RSI_HIGH]
         # 逆張り方向: [RSI_LOW, base - min_width]
-        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
-        if trial.number % 2 == 0:
+        rsi_direction = trial.suggest_categorical("rsi_direction", ["momentum", "reversal"])
+        if rsi_direction == "momentum":
             rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
-        else:
+        else:  # reversal
             rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
     elif can_long:
         # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
+        rsi_direction = "momentum"  # 自動的にmomentumに設定
         rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
     elif can_short:
         # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
+        rsi_direction = "reversal"  # 自動的にreversalに設定
         rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
     else:
-        # 制約を満たす範囲が存在しない（通常は発生しない）
+        # 制約を満たす範囲が存在しない（baseの範囲制限により通常は発生しない）
         trial.set_user_attr("prune_reason", "rsi_no_valid_range")
         raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
@@ -858,8 +1093,9 @@ def objective_longterm(
     BB_LOW, BB_HIGH = -3.5, 3.5
     bb_z_min_width = 0.5  # 最小幅制約（緩和: 1.0 → 0.5）
     
-    # baseを先にサンプリング
-    bb_z_base = trial.suggest_float("bb_z_base", BB_LOW, BB_HIGH)
+    # baseを先にサンプリング（空レンジ対策: baseの範囲を制限）
+    # 両方向が常に可能になるように、baseの範囲を[LOW+min_width, HIGH-min_width]に制限
+    bb_z_base = trial.suggest_float("bb_z_base", BB_LOW + bb_z_min_width, BB_HIGH - bb_z_min_width)
     
     # baseに対して制約を満たすmaxの範囲を計算
     # maxは base ± min_width の範囲外から選ぶ必要がある
@@ -870,23 +1106,27 @@ def objective_longterm(
     bb_can_long = (bb_max_low <= BB_HIGH)  # 順張り方向が可能か
     bb_can_short = (bb_max_high >= BB_LOW)  # 逆張り方向が可能か
     
+    # baseの範囲を制限したので、通常は両方向が可能（空レンジ対策済み）
+    # 念のため、方向が1つしかない場合も処理
     if bb_can_long and bb_can_short:
-        # 両方向が可能な場合: trial番号の偶奇で方向を選ぶ（パラメータ空間を増やさない）
+        # 両方向が可能な場合: categoricalパラメータで方向を選ぶ（再現性向上）
         # 順張り方向: [base + min_width, BB_HIGH]
         # 逆張り方向: [BB_LOW, base - min_width]
-        # 実質的にはコイン投げと同じだが、Optunaのサンプラーに学習させない
-        if trial.number % 2 == 0:
+        bb_direction = trial.suggest_categorical("bb_direction", ["momentum", "reversal"])
+        if bb_direction == "momentum":
             bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
-        else:
+        else:  # reversal
             bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
     elif bb_can_long:
         # 順張り方向のみ可能: [base + min_width, BB_HIGH]
+        bb_direction = "momentum"  # 自動的にmomentumに設定
         bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
     elif bb_can_short:
         # 逆張り方向のみ可能: [BB_LOW, base - min_width]
+        bb_direction = "reversal"  # 自動的にreversalに設定
         bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
     else:
-        # 制約を満たす範囲が存在しない（通常は発生しない）
+        # 制約を満たす範囲が存在しない（baseの範囲制限により通常は発生しない）
         trial.set_user_attr("prune_reason", "bb_no_valid_range")
         raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
@@ -921,13 +1161,21 @@ def objective_longterm(
         bb_z_min_width=bb_z_min_width,
     )
     
-    # 順張り/逆張りの方向と幅をログに記録
-    rsi_direction = "順張り" if rsi_max > rsi_base else "逆張り"
-    bb_direction = "順張り" if bb_z_max > bb_z_base else "逆張り"
-    trial.set_user_attr("rsi_direction", rsi_direction)
-    trial.set_user_attr("bb_direction", bb_direction)
+    # 順張り/逆張りの方向と幅をログに記録（directionを必ず保存・ログ出力）
+    # rsi_direction/bb_directionはcategoricalパラメータまたは自動設定された値
+    # 日本語表記も保存（後で説明するのに便利）
+    rsi_direction_str = "順張り" if rsi_max > rsi_base else "逆張り"
+    bb_direction_str = "順張り" if bb_z_max > bb_z_base else "逆張り"
+    trial.set_user_attr("rsi_direction", rsi_direction)  # "momentum" or "reversal"
+    trial.set_user_attr("rsi_direction_jp", rsi_direction_str)  # "順張り" or "逆張り"
+    trial.set_user_attr("bb_direction", bb_direction)  # "momentum" or "reversal"
+    trial.set_user_attr("bb_direction_jp", bb_direction_str)  # "順張り" or "逆張り"
     trial.set_user_attr("rsi_width", abs(rsi_max - rsi_base))
     trial.set_user_attr("bb_z_width", abs(bb_z_max - bb_z_base))
+    
+    # ログ出力（directionを必ず出力）
+    print(f"    [objective_longterm] RSI方向: {rsi_direction} ({rsi_direction_str}), BB方向: {bb_direction} ({bb_direction_str})")
+    sys.stdout.flush()
     
     # バックテスト実行（長期保有型）
     print(f"    [objective_longterm] calculate_longterm_performance呼び出し...")
@@ -948,9 +1196,11 @@ def objective_longterm(
     print(f"    [objective_longterm] calculate_longterm_performance完了")
     sys.stdout.flush()
     
-    # 目的関数: 各ポートフォリオの年率超過リターンの平均 - 下振れ罰
-    # 下振れ罰: P10超過リターン（下位10%の平均）を係数λでペナルティ
+    # 目的関数: 各ポートフォリオの年率超過リターンの集計値 - 下振れ罰
+    # objective_typeに応じて集計方法を変更（過学習対策）
+    annual_excess_returns_list = perf.get("annual_excess_returns_list", [])  # 内部計算用（後で追加）
     mean_excess = perf["mean_annual_excess_return_pct"]
+    median_excess = perf.get("median_annual_excess_return_pct", 0.0)
     p10_excess = perf.get("p10_annual_excess_return_pct", 0.0)  # 下位10%の平均超過リターン
     min_excess = perf.get("min_annual_excess_return_pct", 0.0)  # 最小超過リターン
     n_periods = perf.get("n_periods", 0)  # P10算出に使ったサンプル数（ChatGPT推奨）
@@ -962,15 +1212,48 @@ def objective_longterm(
         print(f"      [objective_longterm] ⚠️  警告: n_periods={n_periods}が少ないため、P10の信頼性が低い可能性があります（閾値: {min_periods_threshold}）")
         # 注意: trialを無効にする（-infを返す）修正も検討可能だが、現状は警告のみ
     
+    # 空評価（評価不能）のチェック（強ペナルティを返す）
+    # annual_excess_returns_listが空、またはn_periodsが0の場合は評価不能
+    if not annual_excess_returns_list or len(annual_excess_returns_list) == 0 or n_periods == 0:
+        # 評価不能な場合は強ペナルティを返す（0.0ではなく、探索が壊れないように）
+        objective_value = -1e9  # 十分小さい値
+        print(f"      [objective_longterm] ⚠️  警告: 評価不能（annual_excess_returns_listが空またはn_periods=0）のため、強ペナルティを返します")
+        print(f"        num_portfolios: {perf.get('num_portfolios', 0)}, n_periods: {n_periods}")
+        sys.stdout.flush()
+        trial.set_user_attr("evaluation_failed", True)
+        trial.set_user_attr("evaluation_failed_reason", "empty_annual_excess_returns")
+        return objective_value
+    
+    # objective_typeに応じて集計値を選択（過学習対策）
+    if objective_type == "median":
+        # median目的（外れ値に強い）
+        base_excess = median_excess
+    elif objective_type == "trimmed_mean":
+        # trimmed mean（上下10%をカット、外れ値に強い）
+        try:
+            from scipy.stats import trim_mean
+            if annual_excess_returns_list and len(annual_excess_returns_list) > 0:
+                base_excess = trim_mean(annual_excess_returns_list, 0.1) * 100  # パーセントに変換
+            else:
+                base_excess = mean_excess  # フォールバック（通常は到達しない）
+        except ImportError:
+            print(f"      [objective_longterm] ⚠️  scipyが利用できないため、trimmed_meanをmeanにフォールバック")
+            base_excess = mean_excess
+    else:  # "mean" (デフォルト)
+        # mean目的（従来通り）
+        base_excess = mean_excess
+    
     # 下振れ罰: P10が負の場合はペナルティ、正の場合はボーナス（係数λ）
     downside_penalty = lambda_penalty * min(0.0, p10_excess)  # P10が負の場合のみペナルティ
     
-    # 目的関数: 平均超過 - 下振れ罰
-    objective_value = mean_excess + downside_penalty
+    # 目的関数: 集計超過 - 下振れ罰
+    objective_value = base_excess + downside_penalty
     
     # mean_excessとp10_excessをtrialに保存（将来のλ再採点用、ChatGPT推奨）
     # 注意: これにより、既存のstudy DBから異なるλ値で再採点が可能になる
     trial.set_user_attr("mean_excess", mean_excess)
+    trial.set_user_attr("base_excess", base_excess)  # 実際に使用した集計値
+    trial.set_user_attr("objective_type", objective_type)  # 使用した集計方法
     trial.set_user_attr("p10_excess", p10_excess)
     trial.set_user_attr("n_periods", n_periods)
     trial.set_user_attr("min_excess", min_excess)
@@ -981,7 +1264,8 @@ def objective_longterm(
     # デバッグ用ログ出力（下振れ指標を含む）
     log_msg = (
         f"[Trial {trial.number}] "
-        f"objective={objective_value:.4f}%, "
+        f"objective={objective_value:.4f}% (type={objective_type}), "
+        f"base_excess={base_excess:.4f}%, "
         f"mean_excess={mean_excess:.4f}%, "
         f"p10_excess={p10_excess:.4f}% (n_periods={n_periods}), "
         f"downside_penalty={downside_penalty:.4f}%, "
@@ -1020,6 +1304,7 @@ def main(
         train_end_date: Optional[str] = None,
         lambda_penalty: float = 0.0,
         force_rebuild_cache: bool = False,
+        objective_type: str = "mean",  # "mean", "median", "trimmed_mean"
 ):
     """
     長期保有型の最適化を実行
@@ -1244,8 +1529,13 @@ def main(
     
     if bt_workers == -1:
         available_cpus = max(1, cpu_count - optuna_n_jobs)
+        # より積極的に並列化（CPU数に応じて調整）
+        # バックテストはCPU集約的なため、利用可能なCPUを最大限活用
         backtest_n_jobs = max(1, min(len(train_dates), available_cpus))
-        if len(train_dates) >= 4 and available_cpus >= 2:
+        if len(train_dates) >= 4 and available_cpus >= 4:
+            # 4つ以上のCPUがある場合は、より積極的に並列化
+            backtest_n_jobs = max(4, min(len(train_dates), min(8, available_cpus)))
+        elif len(train_dates) >= 2 and available_cpus >= 2:
             backtest_n_jobs = max(2, min(len(train_dates), min(4, available_cpus)))
     else:
         backtest_n_jobs = bt_workers
@@ -1269,6 +1559,7 @@ def main(
         require_full_horizon=True,  # ホライズン未達の期間を除外
         as_of_date=as_of_date,
         lambda_penalty=lambda_penalty,
+        objective_type=objective_type,
     )
     
     # 既存の完了trial数を考慮
@@ -1583,8 +1874,10 @@ def main(
             "liquidity_quantile_cut": best_params["liquidity_quantile_cut"],
             "rsi_base": best_params["rsi_base"],
             "rsi_max": best_params["rsi_max"],
+            "rsi_direction": best_params.get("rsi_direction", "unknown"),  # "momentum" or "reversal"
             "bb_z_base": best_params["bb_z_base"],
             "bb_z_max": best_params["bb_z_max"],
+            "bb_direction": best_params.get("bb_direction", "unknown"),  # "momentum" or "reversal"
             "bb_weight": best_params["bb_weight"],
             "rsi_weight": 1.0 - best_params["bb_weight"],
             "rsi_min_width": 10.0,  # 固定値（最小幅制約、緩和済み）
@@ -1626,6 +1919,8 @@ if __name__ == "__main__":
     parser.add_argument("--as-of-date", type=str, default=None, help="評価の打ち切り日（YYYY-MM-DD、Noneの場合はend_dateを使用）")
     parser.add_argument("--train-end-date", type=str, default=None, help="学習期間の終了日（YYYY-MM-DD、Noneの場合はtrain_ratioを使用）")
     parser.add_argument("--force-rebuild-cache", action="store_true", help="既存のキャッシュを無視して再構築する")
+    parser.add_argument("--objective-type", type=str, choices=["mean", "median", "trimmed_mean"], default="mean",
+                       help="目的関数の集計方法（mean: 平均、median: 中央値、trimmed_mean: 上下10%カット平均、デフォルト: mean）")
     
     args = parser.parse_args()
     
@@ -1652,5 +1947,6 @@ if __name__ == "__main__":
         train_end_date=args.train_end_date,
         lambda_penalty=args.lambda_penalty,
         force_rebuild_cache=args.force_rebuild_cache,
+        objective_type=args.objective_type,
     )
 

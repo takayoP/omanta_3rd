@@ -1,0 +1,68 @@
+# 下振れ罰係数λの比較結果: operational_24M
+
+**期間**: 2018-01-01 ～ 2023-12-31
+**評価日**: 2023-12-31
+**学習期間終了日**: 2022-12-31
+**ホライズン**: 24M
+
+## 比較結果（test期間での評価）
+
+| λ値 | 平均超過(%) | P10(超過)(%) | 勝率(%) | 切替回数 | 期間数 | train超過(%) | test超過(%) |
+|-----|------------|-------------|---------|---------|--------|-------------|-------------|
+| 0.00 | -9.20 | -14.34 | 8.3 | 0 | 12 | 1.44 | 0.00 |
+| 0.05 | -9.28 | -16.20 | 8.3 | 0 | 12 | 0.76 | 0.00 |
+
+**注意**: 切替回数は固定パラメータモードでの評価のため常に0です。レジーム切替戦略での切替回数が必要な場合は、別途実装が必要です。
+
+## 詳細データ
+
+```json
+{
+  "params_id": "operational_24M",
+  "period": {
+    "start_date": "2018-01-01",
+    "end_date": "2023-12-31",
+    "as_of_date": "2023-12-31",
+    "train_end_date": "2022-12-31"
+  },
+  "horizon_months": 24,
+  "lambda_values": [
+    0.0,
+    0.05
+  ],
+  "results": {
+    "λ=0.00": {
+      "lambda_penalty": 0.0,
+      "best_objective_value": 1.4449622060373972,
+      "train_mean_excess_return_pct": 1.4449622060373972,
+      "test_mean_excess_return_pct": 0.0,
+      "avg_annualized_excess_return_pct": -9.199535458713816,
+      "p10_excess_return_pct": -14.336162602100226,
+      "win_rate_pct": 8.333333333333332,
+      "switch_count": 0,
+      "num_periods": 12,
+      "test_dates_first": "2021-01-29",
+      "test_dates_last": "2021-12-30",
+      "num_test_periods": 12,
+      "params_file_path": "C:\\Users\\takay\\Dropbox\\Tama_code\\omanta_3rd\\params_operational_24M_lambda0.00_20260112.json",
+      "optimization_result_file": "C:\\Users\\takay\\Dropbox\\Tama_code\\omanta_3rd\\optimization_result_operational_24M_lambda0.00_20260112.json"
+    },
+    "λ=0.05": {
+      "lambda_penalty": 0.05,
+      "best_objective_value": 0.7605900245619889,
+      "train_mean_excess_return_pct": 0.7605900245619889,
+      "test_mean_excess_return_pct": 0.0,
+      "avg_annualized_excess_return_pct": -9.277294959344337,
+      "p10_excess_return_pct": -16.202683713605744,
+      "win_rate_pct": 8.333333333333332,
+      "switch_count": 0,
+      "num_periods": 12,
+      "test_dates_first": "2021-01-29",
+      "test_dates_last": "2021-12-30",
+      "num_test_periods": 12,
+      "params_file_path": "C:\\Users\\takay\\Dropbox\\Tama_code\\omanta_3rd\\params_operational_24M_lambda0.05_20260112.json",
+      "optimization_result_file": "C:\\Users\\takay\\Dropbox\\Tama_code\\omanta_3rd\\optimization_result_operational_24M_lambda0.05_20260112.json"
+    }
+  }
+}
+```

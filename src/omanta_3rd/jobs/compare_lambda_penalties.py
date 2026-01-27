@@ -27,7 +27,6 @@ import pandas as pd
 
 from ..infra.db import connect_db
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
-from ..jobs.batch_longterm_run_with_regime import run_monthly_portfolio_with_regime
 from ..backtest.performance_from_dataframe import calculate_portfolio_performance_from_dataframe
 from ..config.settings import PROJECT_ROOT
 from ..config.params_registry import get_registry_entry, load_params_by_id_longterm
@@ -469,7 +468,8 @@ def compare_lambda_penalties(
         lambda_values = [0.00, 0.05, 0.03, 0.08]  # 優先順位: 0.00, 0.05, 0.03, 0.08
     
     if version is None:
-        version = datetime.now().strftime("%Y%m%d")
+        # 時刻を含めて一意なstudy名を生成（既存のstudyと重複しないように）
+        version = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # パラメータIDからhorizon_monthsとstudy_typeを決定
     registry_entry = get_registry_entry(params_id)
