@@ -154,4 +154,3 @@ python -m omanta_3rd.jobs.optimize_longterm `
 4. **中断と再開**
    - OptunaのstudyはSQLiteに保存されるため、中断しても再開可能
    - `load_if_exists=True`により、既存のtrialを引き継げる
-

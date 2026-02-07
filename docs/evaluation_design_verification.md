@@ -120,4 +120,3 @@ python -m omanta_3rd.jobs.optimize_longterm `
 3. **別splitでの再現**（`train_end_date`をずらして別のテスト期間で確認）
 4. **安定性（seed）確認**（seedを変えても近いbestが出るか）
 5. **λ比較**（Study Aのレンジをベースに実行）
-

@@ -59,6 +59,7 @@ def _calculate_performance_single_longterm(
     rebalance_date: str,
     eval_date: str,
     portfolio_df_dict: dict,
+    cost_bps: float = 0.0,
 ) -> Optional[Dict[str, Any]]:
     """
     単一のリバランス日に対するパフォーマンス計算のみ（並列化用）
@@ -67,6 +68,7 @@ def _calculate_performance_single_longterm(
         rebalance_date: リバランス日
         eval_date: 評価日
         portfolio_df_dict: ポートフォリオDataFrameを辞書化したもの（{'index': [...], 'data': {...}}形式）
+        cost_bps: 取引コスト（bps、デフォルト: 0.0）
     
     Returns:
         パフォーマンス指標の辞書、エラー時はNone
@@ -91,8 +93,8 @@ def _calculate_performance_single_longterm(
             save_portfolio(conn, portfolio_df)
             conn.commit()
             
-            # パフォーマンスを計算
-            perf = calculate_portfolio_performance(rebalance_date, eval_date)
+            # パフォーマンスを計算（コストを適用）
+            perf = calculate_portfolio_performance(rebalance_date, eval_date, cost_bps=cost_bps)
             if "error" not in perf:
                 return perf
             else:
@@ -521,7 +523,7 @@ def calculate_longterm_performance(
             # indexも保存
             portfolio_df_dict['_index'] = list(portfolio_df.index)
             
-            portfolio_tasks.append((rebalance_date, portfolio_df_dict, eval_date))
+            portfolio_tasks.append((rebalance_date, portfolio_df_dict, eval_date, cost_bps))
     
     # パフォーマンス計算を並列実行
     if len(portfolio_tasks) == 0:
@@ -541,8 +543,9 @@ def calculate_longterm_performance(
                             rebalance_date,
                             eval_date,
                             portfolio_df_dict,
+                            cost_bps,
                         ): rebalance_date
-                        for rebalance_date, portfolio_df_dict, eval_date in portfolio_tasks
+                        for rebalance_date, portfolio_df_dict, eval_date, cost_bps in portfolio_tasks
                     }
                     
                     for future in as_completed(futures):
@@ -559,9 +562,9 @@ def calculate_longterm_performance(
                 # ProcessPoolExecutorが失敗した場合（Windows等）は逐次実行にフォールバック
                 print(f"      [calculate_longterm_performance] ⚠️  並列実行に失敗したため、逐次実行に切り替えます: {e}")
                 sys.stdout.flush()
-                for rebalance_date, portfolio_df_dict, eval_date in portfolio_tasks:
+                for rebalance_date, portfolio_df_dict, eval_date, cost_bps_task in portfolio_tasks:
                     try:
-                        perf = _calculate_performance_single_longterm(rebalance_date, eval_date, portfolio_df_dict)
+                        perf = _calculate_performance_single_longterm(rebalance_date, eval_date, portfolio_df_dict, cost_bps_task)
                         if perf is not None:
                             performances.append(perf)
                     except Exception as e2:
@@ -572,9 +575,9 @@ def calculate_longterm_performance(
             # 逐次実行
             print(f"      [calculate_longterm_performance] パフォーマンス計算を逐次実行")
             sys.stdout.flush()
-            for rebalance_date, portfolio_df_dict, eval_date in portfolio_tasks:
+            for rebalance_date, portfolio_df_dict, eval_date, cost_bps_task in portfolio_tasks:
                 try:
-                    perf = _calculate_performance_single_longterm(rebalance_date, eval_date, portfolio_df_dict)
+                    perf = _calculate_performance_single_longterm(rebalance_date, eval_date, portfolio_df_dict, cost_bps_task)
                     if perf is not None:
                         performances.append(perf)
                 except Exception as e:
@@ -585,7 +588,7 @@ def calculate_longterm_performance(
     # デバッグ出力（指定されたrebalance_dateのみ）
     if debug_rebalance_dates and len(performances) > 0:
         # rebalance_dateからeval_dateを取得するためのマッピングを作成
-        rebalance_to_eval = {rd: ed for rd, _, ed in portfolio_tasks}
+        rebalance_to_eval = {rd: ed for rd, _, ed, _ in portfolio_tasks}
         
         for perf in performances:
             rebalance_date = perf.get("rebalance_date")
@@ -679,7 +682,7 @@ def calculate_longterm_performance(
     # 注意: 本番運用時は削除しない
     if len(portfolio_tasks) > 0:
         with connect_db() as conn:
-            for rebalance_date, _, _ in portfolio_tasks:
+            for rebalance_date, _, _, _ in portfolio_tasks:
                 conn.execute(
                     "DELETE FROM portfolio_monthly WHERE rebalance_date = ?",
                     (rebalance_date,)
@@ -720,7 +723,7 @@ def calculate_longterm_performance(
     print(f"      [calculate_longterm_performance] 【チェックA】固定ホライズン評価の確認:")
     print(f"        rebalance_date | eval_end_date | holding_years | 備考")
     print(f"        " + "-" * 70)
-    rebalance_to_eval = {rd: ed for rd, _, ed in portfolio_tasks}
+    rebalance_to_eval = {rd: ed for rd, _, ed, _ in portfolio_tasks}
     for perf in sorted(performances, key=lambda p: p.get("rebalance_date", "")):
         rebalance_date = perf.get("rebalance_date")
         eval_date_used = perf.get("as_of_date")  # 実際に使用されたeval_date
@@ -949,7 +952,7 @@ def calculate_longterm_performance(
 def objective_longterm(
     trial: optuna.Trial,
     train_dates: List[str],
-    study_type: Literal["A", "B", "C"],
+    study_type: Literal["A", "B", "C", "A_local"],
     cost_bps: float = 0.0,
     n_jobs: int = -1,
     features_dict: Optional[Dict[str, pd.DataFrame]] = None,
@@ -988,7 +991,7 @@ def objective_longterm(
     print(f"    [objective_longterm] パラメータ提案開始...")
     sys.stdout.flush()
     
-    # Study A/B/Cで異なる範囲
+    # Study A/B/C/A_localで異なる範囲
     if study_type == "A":
         # Study A: BB寄り・低ROE閾値
         w_quality = trial.suggest_float("w_quality", 0.05, 0.50)
@@ -999,6 +1002,21 @@ def objective_longterm(
         w_forward_per = trial.suggest_float("w_forward_per", 0.20, 0.90)
         roe_min = trial.suggest_float("roe_min", 0.00, 0.12)
         bb_weight = trial.suggest_float("bb_weight", 0.30, 0.95)
+    elif study_type == "A_local":
+        # Study A_local: Study Aのbest近傍で局所探索
+        # 重要度が高いパラメータ: 広めに探索
+        roe_min = trial.suggest_float("roe_min", 0.00, 0.06)  # best: 0.0236
+        w_size = trial.suggest_float("w_size", 0.25, 0.45)  # best: 0.336 (正規化後)
+        
+        # 重要度が中程度のパラメータ: 小幅探索（best値の±10%程度）
+        w_quality = trial.suggest_float("w_quality", 0.40, 0.48)  # best: 0.437
+        w_value = trial.suggest_float("w_value", 0.13, 0.15)  # best: 0.143
+        w_growth = trial.suggest_float("w_growth", 0.06, 0.08)  # best: 0.074
+        w_record_high = trial.suggest_float("w_record_high", 0.005, 0.015)  # best: 0.010
+        
+        # 重要度が低いパラメータ: best値で固定
+        w_forward_per = 0.3335  # best値で固定
+        bb_weight = 0.3921  # best値で固定
     elif study_type == "B":
         # Study B: Value寄り・ROE閾値やや高め（ただし、より広い範囲で探索）
         w_quality = trial.suggest_float("w_quality", 0.05, 0.50)
@@ -1044,6 +1062,9 @@ def objective_longterm(
     if study_type == "C":
         # Study C: 意味のある範囲で自由に探索
         liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.05, 0.50)  # 拡張: 0.10-0.30 → 0.05-0.50
+    elif study_type == "A_local":
+        # Study A_local: best値で固定
+        liquidity_quantile_cut = 0.2100  # best値で固定
     else:
         # Study A/B: 以前と同じ範囲に固定、比較の公平性のため
         liquidity_quantile_cut = trial.suggest_float("liquidity_quantile_cut", 0.10, 0.30)
@@ -1052,83 +1073,107 @@ def objective_longterm(
     RSI_LOW, RSI_HIGH = 15.0, 85.0
     rsi_min_width = 10.0  # 最小幅制約（緩和: 20.0 → 10.0）
     
-    # baseを先にサンプリング（空レンジ対策: baseの範囲を制限）
-    # 両方向が常に可能になるように、baseの範囲を[min_width, HIGH-min_width]に制限
-    rsi_base = trial.suggest_float("rsi_base", RSI_LOW + rsi_min_width, RSI_HIGH - rsi_min_width)
+    if study_type == "A_local":
+        # Study A_local: best値の近傍で小幅探索
+        # best: rsi_base=78.99, rsi_max=67.02（逆張り）
+        # 小幅探索: ±5.0程度
+        rsi_base = trial.suggest_float("rsi_base", 74.0, 84.0)  # best: 78.99
+    else:
+        # baseを先にサンプリング（空レンジ対策: baseの範囲を制限）
+        # 両方向が常に可能になるように、baseの範囲を[min_width, HIGH-min_width]に制限
+        rsi_base = trial.suggest_float("rsi_base", RSI_LOW + rsi_min_width, RSI_HIGH - rsi_min_width)
     
     # baseに対して制約を満たすmaxの範囲を計算
     # maxは base ± min_width の範囲外から選ぶ必要がある
-    max_low = max(RSI_LOW, rsi_base + rsi_min_width)  # 順張り方向の下限: base + min_width 以上
-    max_high = min(RSI_HIGH, rsi_base - rsi_min_width)  # 逆張り方向の上限: base - min_width 以下
-    
-    # 制約を満たす範囲が存在するかチェック
-    can_long = (max_low <= RSI_HIGH)  # 順張り方向が可能か
-    can_short = (max_high >= RSI_LOW)  # 逆張り方向が可能か
-    
-    # baseの範囲を制限したので、通常は両方向が可能（空レンジ対策済み）
-    # 念のため、方向が1つしかない場合も処理
-    if can_long and can_short:
-        # 両方向が可能な場合: categoricalパラメータで方向を選ぶ（再現性向上）
-        # 順張り方向: [base + min_width, RSI_HIGH]
-        # 逆張り方向: [RSI_LOW, base - min_width]
-        rsi_direction = trial.suggest_categorical("rsi_direction", ["momentum", "reversal"])
-        if rsi_direction == "momentum":
-            rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
-        else:  # reversal
-            rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
-    elif can_long:
-        # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
-        rsi_direction = "momentum"  # 自動的にmomentumに設定
-        rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
-    elif can_short:
-        # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
-        rsi_direction = "reversal"  # 自動的にreversalに設定
-        rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+    if study_type == "A_local":
+        # Study A_local: best値の近傍で小幅探索（逆張り固定）
+        # best: rsi_max=67.02（逆張り）
+        rsi_direction = "reversal"  # best値が逆張りなので固定
+        rsi_max = trial.suggest_float("rsi_max", 62.0, 72.0)  # best: 67.02
     else:
-        # 制約を満たす範囲が存在しない（baseの範囲制限により通常は発生しない）
-        trial.set_user_attr("prune_reason", "rsi_no_valid_range")
-        raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
+        max_low = max(RSI_LOW, rsi_base + rsi_min_width)  # 順張り方向の下限: base + min_width 以上
+        max_high = min(RSI_HIGH, rsi_base - rsi_min_width)  # 逆張り方向の上限: base - min_width 以下
+        
+        # 制約を満たす範囲が存在するかチェック
+        can_long = (max_low <= RSI_HIGH)  # 順張り方向が可能か
+        can_short = (max_high >= RSI_LOW)  # 逆張り方向が可能か
+        
+        # baseの範囲を制限したので、通常は両方向が可能（空レンジ対策済み）
+        # 念のため、方向が1つしかない場合も処理
+        if can_long and can_short:
+            # 両方向が可能な場合: categoricalパラメータで方向を選ぶ（再現性向上）
+            # 順張り方向: [base + min_width, RSI_HIGH]
+            # 逆張り方向: [RSI_LOW, base - min_width]
+            rsi_direction = trial.suggest_categorical("rsi_direction", ["momentum", "reversal"])
+            if rsi_direction == "momentum":
+                rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+            else:  # reversal
+                rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+        elif can_long:
+            # 順張り方向のみ可能: [base + min_width, RSI_HIGH]
+            rsi_direction = "momentum"  # 自動的にmomentumに設定
+            rsi_max = trial.suggest_float("rsi_max", max_low, RSI_HIGH)
+        elif can_short:
+            # 逆張り方向のみ可能: [RSI_LOW, base - min_width]
+            rsi_direction = "reversal"  # 自動的にreversalに設定
+            rsi_max = trial.suggest_float("rsi_max", RSI_LOW, max_high)
+        else:
+            # 制約を満たす範囲が存在しない（baseの範囲制限により通常は発生しない）
+            trial.set_user_attr("prune_reason", "rsi_no_valid_range")
+            raise optuna.TrialPruned(f"RSI: base={rsi_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     # BB Z-scoreパラメータ（順張り/逆張りを対称に探索）
     BB_LOW, BB_HIGH = -3.5, 3.5
     bb_z_min_width = 0.5  # 最小幅制約（緩和: 1.0 → 0.5）
     
-    # baseを先にサンプリング（空レンジ対策: baseの範囲を制限）
-    # 両方向が常に可能になるように、baseの範囲を[LOW+min_width, HIGH-min_width]に制限
-    bb_z_base = trial.suggest_float("bb_z_base", BB_LOW + bb_z_min_width, BB_HIGH - bb_z_min_width)
+    if study_type == "A_local":
+        # Study A_local: best値の近傍で小幅探索
+        # best: bb_z_base=-2.83, bb_z_max=-2.22（逆張り）
+        # 小幅探索: ±0.3程度
+        bb_z_base = trial.suggest_float("bb_z_base", -3.1, -2.5)  # best: -2.83
+    else:
+        # baseを先にサンプリング（空レンジ対策: baseの範囲を制限）
+        # 両方向が常に可能になるように、baseの範囲を[LOW+min_width, HIGH-min_width]に制限
+        bb_z_base = trial.suggest_float("bb_z_base", BB_LOW + bb_z_min_width, BB_HIGH - bb_z_min_width)
     
     # baseに対して制約を満たすmaxの範囲を計算
     # maxは base ± min_width の範囲外から選ぶ必要がある
-    bb_max_low = max(BB_LOW, bb_z_base + bb_z_min_width)  # 順張り方向の下限: base + min_width 以上
-    bb_max_high = min(BB_HIGH, bb_z_base - bb_z_min_width)  # 逆張り方向の上限: base - min_width 以下
-    
-    # 制約を満たす範囲が存在するかチェック
-    bb_can_long = (bb_max_low <= BB_HIGH)  # 順張り方向が可能か
-    bb_can_short = (bb_max_high >= BB_LOW)  # 逆張り方向が可能か
-    
-    # baseの範囲を制限したので、通常は両方向が可能（空レンジ対策済み）
-    # 念のため、方向が1つしかない場合も処理
-    if bb_can_long and bb_can_short:
-        # 両方向が可能な場合: categoricalパラメータで方向を選ぶ（再現性向上）
-        # 順張り方向: [base + min_width, BB_HIGH]
-        # 逆張り方向: [BB_LOW, base - min_width]
-        bb_direction = trial.suggest_categorical("bb_direction", ["momentum", "reversal"])
-        if bb_direction == "momentum":
-            bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
-        else:  # reversal
-            bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
-    elif bb_can_long:
-        # 順張り方向のみ可能: [base + min_width, BB_HIGH]
-        bb_direction = "momentum"  # 自動的にmomentumに設定
-        bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
-    elif bb_can_short:
-        # 逆張り方向のみ可能: [BB_LOW, base - min_width]
-        bb_direction = "reversal"  # 自動的にreversalに設定
-        bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+    if study_type == "A_local":
+        # Study A_local: best値の近傍で小幅探索（逆張り固定）
+        # best: bb_z_max=-2.22（逆張り）
+        bb_direction = "reversal"  # best値が逆張りなので固定
+        bb_z_max = trial.suggest_float("bb_z_max", -2.5, -1.9)  # best: -2.22
     else:
-        # 制約を満たす範囲が存在しない（baseの範囲制限により通常は発生しない）
-        trial.set_user_attr("prune_reason", "bb_no_valid_range")
-        raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
+        bb_max_low = max(BB_LOW, bb_z_base + bb_z_min_width)  # 順張り方向の下限: base + min_width 以上
+        bb_max_high = min(BB_HIGH, bb_z_base - bb_z_min_width)  # 逆張り方向の上限: base - min_width 以下
+        
+        # 制約を満たす範囲が存在するかチェック
+        bb_can_long = (bb_max_low <= BB_HIGH)  # 順張り方向が可能か
+        bb_can_short = (bb_max_high >= BB_LOW)  # 逆張り方向が可能か
+        
+        # baseの範囲を制限したので、通常は両方向が可能（空レンジ対策済み）
+        # 念のため、方向が1つしかない場合も処理
+        if bb_can_long and bb_can_short:
+            # 両方向が可能な場合: categoricalパラメータで方向を選ぶ（再現性向上）
+            # 順張り方向: [base + min_width, BB_HIGH]
+            # 逆張り方向: [BB_LOW, base - min_width]
+            bb_direction = trial.suggest_categorical("bb_direction", ["momentum", "reversal"])
+            if bb_direction == "momentum":
+                bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+            else:  # reversal
+                bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+        elif bb_can_long:
+            # 順張り方向のみ可能: [base + min_width, BB_HIGH]
+            bb_direction = "momentum"  # 自動的にmomentumに設定
+            bb_z_max = trial.suggest_float("bb_z_max", bb_max_low, BB_HIGH)
+        elif bb_can_short:
+            # 逆張り方向のみ可能: [BB_LOW, base - min_width]
+            bb_direction = "reversal"  # 自動的にreversalに設定
+            bb_z_max = trial.suggest_float("bb_z_max", BB_LOW, bb_max_high)
+        else:
+            # 制約を満たす範囲が存在しない（baseの範囲制限により通常は発生しない）
+            trial.set_user_attr("prune_reason", "bb_no_valid_range")
+            raise optuna.TrialPruned(f"BB Z-score: base={bb_z_base:.2f}に対して制約を満たすmaxの範囲が存在しません")
     
     rsi_weight = 1.0 - bb_weight
     
@@ -1284,7 +1329,7 @@ def objective_longterm(
 def main(
     start_date: str,
     end_date: str,
-    study_type: Literal["A", "B", "C"],
+    study_type: Literal["A", "B", "C", "A_local"],
     n_trials: int = 200,
     study_name: Optional[str] = None,
     n_jobs: int = -1,
@@ -1305,6 +1350,9 @@ def main(
         lambda_penalty: float = 0.0,
         force_rebuild_cache: bool = False,
         objective_type: str = "mean",  # "mean", "median", "trimmed_mean"
+        initial_params_json: Optional[str] = None,  # 初期点として投入する最適化結果JSONファイルのパス
+        local_search: bool = False,  # 局所探索モード（重要度の高いパラメータのみ探索、他は固定）
+        local_search_params_json: Optional[str] = None,  # 局所探索の中心となる最適化結果JSONファイルのパス
 ):
     """
     長期保有型の最適化を実行
@@ -1345,6 +1393,8 @@ def main(
         study_type_desc = "BB寄り・低ROE閾値"
     elif study_type == "B":
         study_type_desc = "Value寄り・ROE閾値やや高め"
+    elif study_type == "A_local":
+        study_type_desc = "Study Aのbest近傍で局所探索"
     else:  # study_type == "C"
         study_type_desc = "Study A/B統合・広範囲探索"
     
@@ -1498,6 +1548,63 @@ def main(
         load_if_exists=True,
         sampler=sampler,
     )
+    
+    # 初期点として投入するパラメータを読み込む（指定されている場合）
+    if initial_params_json:
+        import json
+        from pathlib import Path
+        
+        json_path = Path(initial_params_json)
+        if not json_path.exists():
+            print(f"⚠️  警告: 初期点として指定されたJSONファイルが見つかりません: {initial_params_json}")
+            print(f"   初期点の投入をスキップします。")
+        else:
+            print(f"📄 初期点として投入するパラメータを読み込み中: {initial_params_json}")
+            with open(json_path, "r", encoding="utf-8") as f:
+                initial_data = json.load(f)
+            
+            initial_params = initial_data.get("best_trial", {}).get("params", {})
+            if not initial_params:
+                print(f"⚠️  警告: JSONファイルにbest_trial.paramsが見つかりません。初期点の投入をスキップします。")
+            else:
+                # 方向パラメータを推論（1/21のJSONには含まれていない可能性がある）
+                rsi_base = initial_params.get("rsi_base")
+                rsi_max = initial_params.get("rsi_max")
+                bb_z_base = initial_params.get("bb_z_base")
+                bb_z_max = initial_params.get("bb_z_max")
+                
+                # RSI方向の推論
+                if rsi_base is not None and rsi_max is not None:
+                    rsi_direction = "reversal" if rsi_base > rsi_max else "momentum"
+                    initial_params["rsi_direction"] = rsi_direction
+                
+                # BB方向の推論
+                if bb_z_base is not None and bb_z_max is not None:
+                    if bb_z_base < bb_z_max:
+                        if bb_z_base < 0 and bb_z_max < 0:
+                            bb_direction = "reversal"
+                        else:
+                            bb_direction = "momentum"
+                    else:
+                        bb_direction = "reversal"
+                    initial_params["bb_direction"] = bb_direction
+                
+                # enqueue_trialで初期点として投入
+                try:
+                    # 初期点であることを識別するためのuser_attrを設定（trial実行時に反映される）
+                    # 注意: enqueue_trialではuser_attrを直接設定できないため、
+                    # objective_longterm関数内で初期点を識別できるようにする必要がある
+                    # ただし、初期点は既に検証済みのパラメータなので、制約違反でpruneされる可能性は低い
+                    study.enqueue_trial(initial_params)
+                    print(f"✅ 初期点として投入しました: {len(initial_params)}個のパラメータ")
+                    print(f"   RSI方向: {initial_params.get('rsi_direction', 'N/A')}")
+                    print(f"   BB方向: {initial_params.get('bb_direction', 'N/A')}")
+                    print(f"   注意: 並列実行時（n_jobs>1）は、初期点が「最初に完了する」とは限りません。")
+                    print(f"         キューには入りますが、実行・完了順は前後し得ます。")
+                except Exception as e:
+                    print(f"⚠️  警告: 初期点の投入に失敗しました: {e}")
+                    print(f"   初期点の投入をスキップします。")
+            print()
     
     # 既存のtrial数を確認（load_if_exists=Trueの場合）
     existing_trials = len(study.trials)
@@ -1658,7 +1765,13 @@ def main(
     
     print("最良パラメータ:")
     for key, value in study.best_params.items():
-        print(f"  {key}: {value:.6f}")
+        # categoricalパラメータ（文字列）の場合はフォーマットしない
+        if isinstance(value, str):
+            print(f"  {key}: {value}")
+        elif isinstance(value, (int, float)):
+            print(f"  {key}: {value:.6f}")
+        else:
+            print(f"  {key}: {value}")
     print()
     
     # テストデータで評価
@@ -1684,6 +1797,16 @@ def main(
     w_record_high /= total
     w_size /= total
     
+    # study_type == "A_local"の場合、固定パラメータはbest_paramsに含まれていないため、デフォルト値を設定
+    if study_type == "A_local":
+        w_forward_per = best_params.get("w_forward_per", 0.3335)  # best値で固定
+        bb_weight = best_params.get("bb_weight", 0.3921)  # best値で固定
+        liquidity_quantile_cut = best_params.get("liquidity_quantile_cut", 0.2100)  # best値で固定
+    else:
+        w_forward_per = best_params["w_forward_per"]
+        bb_weight = best_params["bb_weight"]
+        liquidity_quantile_cut = best_params["liquidity_quantile_cut"]
+    
     default_params = StrategyParams()
     strategy_params = replace(
         default_params,
@@ -1694,10 +1817,10 @@ def main(
         w_growth=w_growth,
         w_record_high=w_record_high,
         w_size=w_size,
-        w_forward_per=best_params["w_forward_per"],
-        w_pbr=1.0 - best_params["w_forward_per"],
+        w_forward_per=w_forward_per,
+        w_pbr=1.0 - w_forward_per,
         roe_min=best_params["roe_min"],
-        liquidity_quantile_cut=best_params["liquidity_quantile_cut"],
+        liquidity_quantile_cut=liquidity_quantile_cut,
     )
     
     # EntryScoreParamsを構築
@@ -1706,8 +1829,8 @@ def main(
         rsi_max=best_params["rsi_max"],
         bb_z_base=best_params["bb_z_base"],
         bb_z_max=best_params["bb_z_max"],
-        bb_weight=best_params["bb_weight"],
-        rsi_weight=1.0 - best_params["bb_weight"],
+        bb_weight=bb_weight,
+        rsi_weight=1.0 - bb_weight,
         rsi_min_width=10.0,  # 最小幅制約（緩和: 20.0 → 10.0）
         bb_z_min_width=0.5,  # 最小幅制約（緩和: 1.0 → 0.5）
     )
@@ -1868,18 +1991,18 @@ def main(
             "w_growth": w_growth,
             "w_record_high": w_record_high,
             "w_size": w_size,
-            "w_forward_per": best_params["w_forward_per"],
-            "w_pbr": 1.0 - best_params["w_forward_per"],
+            "w_forward_per": w_forward_per,  # 修正: 変数を使用（A_localの場合は固定値）
+            "w_pbr": 1.0 - w_forward_per,
             "roe_min": best_params["roe_min"],
-            "liquidity_quantile_cut": best_params["liquidity_quantile_cut"],
+            "liquidity_quantile_cut": liquidity_quantile_cut,  # 修正: 変数を使用（A_localの場合は固定値）
             "rsi_base": best_params["rsi_base"],
             "rsi_max": best_params["rsi_max"],
             "rsi_direction": best_params.get("rsi_direction", "unknown"),  # "momentum" or "reversal"
             "bb_z_base": best_params["bb_z_base"],
             "bb_z_max": best_params["bb_z_max"],
             "bb_direction": best_params.get("bb_direction", "unknown"),  # "momentum" or "reversal"
-            "bb_weight": best_params["bb_weight"],
-            "rsi_weight": 1.0 - best_params["bb_weight"],
+            "bb_weight": bb_weight,  # 修正: 変数を使用（A_localの場合は固定値）
+            "rsi_weight": 1.0 - bb_weight,
             "rsi_min_width": 10.0,  # 固定値（最小幅制約、緩和済み）
             "bb_z_min_width": 0.5,  # 固定値（最小幅制約、緩和済み）
         },
@@ -1901,8 +2024,8 @@ if __name__ == "__main__":
     
     parser.add_argument("--start", type=str, required=True, help="開始日（YYYY-MM-DD）")
     parser.add_argument("--end", type=str, required=True, help="終了日（YYYY-MM-DD）")
-    parser.add_argument("--study-type", type=str, choices=["A", "B", "C"], required=True,
-                       help="Studyタイプ: A（BB寄り・低ROE閾値）、B（Value寄り・ROE閾値やや高め）、C（Study A/B統合・広範囲探索）")
+    parser.add_argument("--study-type", type=str, choices=["A", "B", "C", "A_local"], required=True,
+                       help="Studyタイプ: A（BB寄り・低ROE閾値）、B（Value寄り・ROE閾値やや高め）、C（Study A/B統合・広範囲探索）、A_local（Study Aのbest近傍で局所探索）")
     parser.add_argument("--n-trials", type=int, default=200, help="試行回数（デフォルト: 200）")
     parser.add_argument("--study-name", type=str, default=None, help="スタディ名（Noneの場合は自動生成）")
     parser.add_argument("--n-jobs", type=int, default=-1, help="trial並列数（-1でCPU数）")
@@ -1921,6 +2044,8 @@ if __name__ == "__main__":
     parser.add_argument("--force-rebuild-cache", action="store_true", help="既存のキャッシュを無視して再構築する")
     parser.add_argument("--objective-type", type=str, choices=["mean", "median", "trimmed_mean"], default="mean",
                        help="目的関数の集計方法（mean: 平均、median: 中央値、trimmed_mean: 上下10%カット平均、デフォルト: mean）")
+    parser.add_argument("--initial-params-json", type=str, default=None,
+                       help="初期点として投入する最適化結果JSONファイルのパス（例: optimization_result_optimization_longterm_studyA_20260121_204615.json）")
     
     args = parser.parse_args()
     
@@ -1948,5 +2073,6 @@ if __name__ == "__main__":
         lambda_penalty=args.lambda_penalty,
         force_rebuild_cache=args.force_rebuild_cache,
         objective_type=args.objective_type,
+        initial_params_json=args.initial_params_json,
     )
 

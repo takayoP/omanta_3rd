@@ -188,4 +188,3 @@ python -m omanta_3rd.jobs.optimize_longterm `
 3. チェックA/Bで固定ホライズン評価を確認
 4. median目的とmean目的の結果を比較
 5. 必要に応じて、残りの改善（複数年テスト、Dirichlet化）を実装
-

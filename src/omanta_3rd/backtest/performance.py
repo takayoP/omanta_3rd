@@ -183,6 +183,7 @@ def calculate_portfolio_performance(
     rebalance_date: str,
     as_of_date: Optional[str] = None,
     portfolio_table: str = "portfolio_monthly",
+    cost_bps: float = 0.0,
 ) -> Dict[str, Any]:
     """
     指定されたrebalance_dateのポートフォリオのパフォーマンスを計算
@@ -193,6 +194,8 @@ def calculate_portfolio_performance(
         portfolio_table: ポートフォリオテーブル名（デフォルト: "portfolio_monthly"）
                          長期保有型: "portfolio_monthly"
                          月次リバランス型: "monthly_rebalance_portfolio"
+        cost_bps: 取引コスト（bps、デフォルト: 0.0）
+                  長期保有型の場合、購入時と売却時のコストが適用される
         
     Returns:
         パフォーマンス情報の辞書
@@ -430,7 +433,28 @@ def calculate_portfolio_performance(
             coverage = 0.0
         
         # sum(min_count=1)を使用: 全部NaNならNaNを維持（誤った0%を防ぐ）
-        total_return = portfolio["weighted_return"].sum(min_count=1)
+        total_return_gross = portfolio["weighted_return"].sum(min_count=1)
+        
+        # コストを適用（長期保有型: 購入時と売却時のコスト）
+        # 長期保有型では、リバランスが1回だけなので、購入と売却が1回ずつ発生
+        # 購入コスト: 購入金額 × cost_bps / 10000
+        # 売却コスト: 売却金額 × cost_bps / 10000
+        # 正確な計算:
+        #   - 購入コスト率 = cost_bps / 10000
+        #   - 売却コスト率 = (1.0 + total_return_gross/100) × cost_bps / 10000
+        #   - 合計コスト率 = cost_bps / 10000 × (1.0 + 1.0 + total_return_gross/100)
+        # ただし、total_return_grossが小さい場合、近似として 2.0 * cost_bps / 10000 でも十分
+        if not pd.isna(total_return_gross) and cost_bps > 0:
+            # 正確なコスト計算
+            # 購入コスト率（パーセント）
+            buy_cost_pct = cost_bps / 100.0  # bps → パーセント
+            # 売却コスト率（パーセント、グロスリターン後の金額に対する）
+            sell_cost_pct = (1.0 + total_return_gross / 100.0) * cost_bps / 100.0  # bps → パーセント
+            # 合計コスト（パーセント）
+            total_cost_pct = buy_cost_pct + sell_cost_pct
+            total_return = total_return_gross - total_cost_pct
+        else:
+            total_return = total_return_gross
         
         # 欠損値の警告（品質管理）
         MIN_COVERAGE = 0.98  # 98%以上のweightが有効でないと警告
@@ -487,6 +511,7 @@ def calculate_portfolio_performance(
         )
         
         # ポートフォリオ全体のTOPIX比較
+        # コスト適用後のリターンを使用
         portfolio_topix_comparison = {
             "total_investment": hypothetical_total_investment,
             "portfolio_return_pct": float(total_return) if not pd.isna(total_return) else None,
@@ -497,6 +522,20 @@ def calculate_portfolio_performance(
                 else None
             ),
         }
+        
+        # コスト情報を追加（デバッグ用）
+        if cost_bps > 0 and not pd.isna(total_return_gross):
+            buy_cost_pct = cost_bps / 100.0
+            sell_cost_pct = (1.0 + total_return_gross / 100.0) * cost_bps / 100.0
+            total_cost_pct = buy_cost_pct + sell_cost_pct
+            portfolio_topix_comparison["cost_info"] = {
+                "cost_bps": cost_bps,
+                "buy_cost_pct": buy_cost_pct,
+                "sell_cost_pct": sell_cost_pct,
+                "total_cost_pct": total_cost_pct,
+                "gross_return_pct": float(total_return_gross),
+                "net_return_pct": float(total_return),
+            }
         
         # 統計情報
         valid_returns = portfolio[portfolio["return_pct"].notna()]["return_pct"]

@@ -147,4 +147,3 @@ python -m omanta_3rd.jobs.optimize_longterm `
 2. 同一seedで2回実行して再現性を確認
 3. median目的とmean目的の結果を比較
 4. 必要に応じて、残りの改善（3-5）を実装
-

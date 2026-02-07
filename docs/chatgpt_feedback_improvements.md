@@ -124,4 +124,3 @@ if n_jobs == -1:
 - [ ] `direction`をcategorical化して1回回し、結果が安定するか
 - [ ] 正規化後の`entry_score`が極端値になっていないか
 - [ ] median目的で結果が改善するか
-

@@ -44,4 +44,3 @@ python -m omanta_3rd.jobs.optimize_longterm `
 
 Write-Host ""
 Write-Host "最適化が完了しました。"
-
