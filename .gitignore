@@ -84,4 +84,7 @@ performance_metrics.csv
 performance_metrics.json
 performance_metrics_summary.csv
 
+# Optimization trial logs (run outputs)
+trials_log_*.jsonl
+logs/*.jsonl
 
