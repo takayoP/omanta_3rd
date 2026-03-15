@@ -39,6 +39,7 @@ from ..features.technicals import (  # noqa: F401
     _calculate_entry_score_with_params,
 )
 from .progress_window import ProgressWindow, TKINTER_AVAILABLE  # noqa: F401
+from .optimize_timeseries import _select_portfolio_for_rebalance_date  # noqa: F401
 
 
 def _select_portfolio_with_params(
@@ -293,59 +294,6 @@ def _calculate_performance_single(
     except Exception as e:
         print(f"パフォーマンス計算エラー ({rebalance_date}): {e}")
     return None
-
-
-def _select_portfolio_for_rebalance_date(
-    rebalance_date: str,
-    strategy_params_dict: dict,
-    entry_params_dict: dict,
-) -> Optional[pd.DataFrame]:
-    """
-    単一のリバランス日に対するポートフォリオ選定のみ（並列化用）
-    
-    【注意】この関数は「ポートフォリオ選定のみ」を行います。パフォーマンス計算は行いません。
-    長期保有型と月次リバランス型の両方で使用可能です。
-    違いは「パフォーマンス計算方法」のみです（長期保有型：固定ホライズン評価、月次リバランス型：月次リターン系列）。
-    
-    Args:
-        rebalance_date: リバランス日
-        strategy_params_dict: StrategyParamsを辞書化したもの
-        entry_params_dict: EntryScoreParamsを辞書化したもの
-    
-    Returns:
-        ポートフォリオDataFrame（エラー時はNone）
-    """
-    try:
-        # 辞書からdataclassに復元
-        strategy_params = StrategyParams(**strategy_params_dict)
-        entry_params = EntryScoreParams(**entry_params_dict)
-        
-        # feat を必ず作る（read_only失敗ならread_writeへ）
-        try:
-            with connect_db(read_only=True) as conn:
-                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-        except sqlite3.OperationalError as e:
-            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
-                with connect_db(read_only=False) as conn:
-                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-            else:
-                raise
-        
-        if feat is None or feat.empty:
-            return None
-        
-        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
-        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
-        
-        if portfolio is None or portfolio.empty:
-            return None
-        
-        return portfolio
-    except Exception as e:
-        print(f"エラー ({rebalance_date}): {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 
 def run_backtest_for_optimization(
