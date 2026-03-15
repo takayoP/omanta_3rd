@@ -34,7 +34,8 @@ from ..jobs.batch_longterm_run_with_regime import run_monthly_portfolio_with_reg
 from ..backtest.performance_from_dataframe import calculate_portfolio_performance_from_dataframe
 from ..config.settings import PROJECT_ROOT
 from ..config.params_registry import get_registry_entry
-from ..jobs.longterm_run import _snap_price_date
+from ..features.loader import _snap_price_date
+from ..backtest.metrics import calculate_annualized_return_from_period, calculate_percentile
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -72,64 +73,6 @@ def calculate_annualized_return(
     
     annualized = (cumulative ** (1.0 / years)) - 1.0
     return annualized
-
-
-def calculate_annualized_return_from_period(
-    total_return: float,
-    start_date: str,
-    end_date: str,
-) -> float:
-    """
-    期間リターンから年率リターンを計算（長期保有型用）
-    
-    Args:
-        total_return: 総リターン（小数、例: 0.5 = 50%）
-        start_date: 開始日（YYYY-MM-DD）
-        end_date: 終了日（YYYY-MM-DD）
-    
-    Returns:
-        年率リターン（小数）
-    """
-    from datetime import datetime
-    
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    
-    # 日数差を計算
-    days_diff = (end_dt - start_dt).days
-    if days_diff <= 0:
-        return 0.0
-    
-    # 年数に変換（365.25日/年）
-    years = days_diff / 365.25
-    
-    if years <= 0:
-        return 0.0
-    
-    # 年率化: (1 + total_return) ^ (1 / years) - 1
-    if total_return <= -1.0:
-        # 完全損失の場合は-100%を返す
-        return -1.0
-    
-    annualized = ((1.0 + total_return) ** (1.0 / years)) - 1.0
-    return annualized
-
-
-def calculate_percentile(returns: List[float], percentile: float) -> float:
-    """
-    パーセンタイルを計算
-    
-    Args:
-        returns: リターンのリスト
-        percentile: パーセンタイル（0-100）
-    
-    Returns:
-        パーセンタイル値
-    """
-    if not returns:
-        return 0.0
-    
-    return float(np.percentile(returns, percentile))
 
 
 def save_results_to_file(

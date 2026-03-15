@@ -1,9 +1,7 @@
 """PER/PBR/ForwardPER、同業比較"""
 
-from typing import Optional, Dict, Any
+from typing import Optional
 import sqlite3
-
-from ..infra.db import connect_db
 
 
 def calculate_per(
