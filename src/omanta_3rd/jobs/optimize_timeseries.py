@@ -59,11 +59,8 @@ from ..backtest.metrics import (
 )
 from ..backtest.feature_cache import FeatureCache
 
-# 既存のoptimize.pyから必要な関数をインポート
-from .optimize import (
-    EntryScoreParams,
-    ProgressWindow,
-)
+from ..features.technicals import EntryScoreParams  # noqa: F401
+from .progress_window import ProgressWindow
 
 
 def run_backtest_for_optimization_timeseries(
