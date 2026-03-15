@@ -16,7 +16,12 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..infra.db import connect_db
-from ..jobs.longterm_run import build_features
+
+
+def _get_build_features():
+    """循環インポート回避のため、使用時のみ longterm_run.build_features をインポート"""
+    from ..jobs.longterm_run import build_features
+    return build_features
 
 
 class FeatureCache:
@@ -185,6 +190,7 @@ class FeatureCache:
             end_date_for_data: 価格データ取得の終了日（Noneの場合はリバランス日の翌営業日を自動計算）
         """
         try:
+            build_features = _get_build_features()
             with connect_db(read_only=True) as conn:
                 feat = build_features(conn, rebalance_date)
             
