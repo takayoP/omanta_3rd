@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import Dict, Any, List, Optional
 import numpy as np
 
@@ -110,3 +111,16 @@ def calculate_metrics_from_timeseries_data(
         "num_missing_stocks": total_missing_count,
     }
 
+
+def get_git_commit_hash() -> Optional[str]:
+    """Gitコミットハッシュを取得"""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return None

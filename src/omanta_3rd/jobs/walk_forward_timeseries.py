@@ -20,8 +20,6 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 import optuna
-import subprocess
-
 from ..infra.db import connect_db
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..jobs.optimize_timeseries import (
@@ -31,22 +29,8 @@ from ..jobs.optimize_timeseries import (
 from ..jobs.longterm_run import StrategyParams
 from ..jobs.optimize import EntryScoreParams
 from ..backtest.timeseries import calculate_timeseries_returns
-from ..backtest.eval_common import calculate_metrics_from_timeseries_data
+from ..backtest.eval_common import calculate_metrics_from_timeseries_data, get_git_commit_hash
 from dataclasses import replace, fields
-
-
-def get_git_commit_hash() -> Optional[str]:
-    """Gitコミットハッシュを取得"""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except Exception:
-        return None
 
 
 def split_dates_into_folds(

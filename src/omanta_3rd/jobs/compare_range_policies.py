@@ -37,39 +37,7 @@ from ..config.params_registry import get_registry_entry
 from ..features.loader import _snap_price_date
 from ..market.regime import get_market_regime
 from dateutil.relativedelta import relativedelta
-
-
-def calculate_annualized_return_from_period(
-    total_return: float,
-    start_date: str,
-    end_date: str,
-) -> float:
-    """
-    期間リターンから年率リターンを計算（長期保有型用）
-    """
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    
-    days_diff = (end_dt - start_dt).days
-    if days_diff <= 0:
-        return 0.0
-    
-    years = days_diff / 365.25
-    if years <= 0:
-        return 0.0
-    
-    if total_return <= -1.0:
-        return -1.0
-    
-    annualized = ((1.0 + total_return) ** (1.0 / years)) - 1.0
-    return annualized
-
-
-def calculate_percentile(returns: List[float], percentile: float) -> float:
-    """パーセンタイルを計算"""
-    if not returns:
-        return 0.0
-    return float(np.percentile(returns, percentile))
+from ..backtest.metrics import calculate_annualized_return_from_period, calculate_percentile
 
 
 def run_regime_switching_with_hysteresis(

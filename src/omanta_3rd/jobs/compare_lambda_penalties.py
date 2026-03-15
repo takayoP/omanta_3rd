@@ -30,43 +30,12 @@ from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..backtest.performance_from_dataframe import calculate_portfolio_performance_from_dataframe
 from ..config.settings import PROJECT_ROOT
 from ..config.params_registry import get_registry_entry, load_params_by_id_longterm
-from ..jobs.longterm_run import _snap_price_date
+from ..features.loader import _snap_price_date
 from ..jobs.params_utils import normalize_params
 from ..jobs.optimize_longterm import main as optimize_longterm_main
 from ..jobs.reoptimize_all_candidates import save_params_file, determine_strategy_mode
 from dateutil.relativedelta import relativedelta
-
-
-def calculate_annualized_return_from_period(
-    total_return: float,
-    start_date: str,
-    end_date: str,
-) -> float:
-    """期間リターンから年率リターンを計算"""
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    
-    days_diff = (end_dt - start_dt).days
-    if days_diff <= 0:
-        return 0.0
-    
-    years = days_diff / 365.25
-    if years <= 0:
-        return 0.0
-    
-    if total_return <= -1.0:
-        return -1.0
-    
-    annualized = ((1.0 + total_return) ** (1.0 / years)) - 1.0
-    return annualized
-
-
-def calculate_percentile(returns: List[float], percentile: float) -> float:
-    """パーセンタイルを計算"""
-    import numpy as np
-    if not returns:
-        return 0.0
-    return float(np.percentile(returns, percentile))
+from ..backtest.metrics import calculate_annualized_return_from_period, calculate_percentile
 
 
 def count_switches_from_performances(performances: List[Dict[str, Any]]) -> int:
