@@ -13,7 +13,6 @@ import pandas as pd
 import optuna
 from optuna.visualization import plot_optimization_history, plot_param_importances
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
 import multiprocessing as mp
 import sqlite3
 from ..infra.db import connect_db
@@ -208,71 +207,6 @@ def _select_portfolio_with_params(
     return sel_df
 
 
-def _run_single_backtest(
-    rebalance_date: str,
-    strategy_params_dict: dict,
-    entry_params_dict: dict,
-    as_of_date: Optional[str] = None,
-    save_portfolio_to_db: bool = False,
-) -> Optional[Dict[str, Any]]:
-    """
-    単一のリバランス日に対するバックテスト実行（並列化用、最適化版）
-    
-    Args:
-        rebalance_date: リバランス日
-        strategy_params_dict: StrategyParamsを辞書化したもの
-        entry_params_dict: EntryScoreParamsを辞書化したもの
-        as_of_date: 評価日
-        save_portfolio_to_db: ポートフォリオをDBに保存するか（デフォルト: False、後で一括保存）
-    
-    Returns:
-        パフォーマンス結果（エラー時はNone）
-    """
-    try:
-        # 辞書からdataclassに復元
-        strategy_params = StrategyParams(**strategy_params_dict)
-        entry_params = EntryScoreParams(**entry_params_dict)
-        
-        # 1) feat を必ず作る（read_only失敗ならread_writeへ）
-        try:
-            with connect_db(read_only=True) as conn:
-                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-        except sqlite3.OperationalError as e:
-            # 読み取り専用エラーの場合は通常の接続を使用
-            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
-                with connect_db(read_only=False) as conn:
-                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-            else:
-                raise
-        
-        # 2) ここからは共通処理（exceptの外！）
-        if feat is None or feat.empty:
-            return None
-        
-        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
-        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
-        
-        if portfolio is None or portfolio.empty:
-            return None
-        
-        # 3) perf がDBのportfolioを読むなら、保存してから計算が必要
-        if save_portfolio_to_db:
-            with connect_db(read_only=False) as conn:
-                save_portfolio(conn, portfolio)
-        
-        # パフォーマンスを計算（DBからポートフォリオを読む設計）
-        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
-        
-        # ポートフォリオ情報を結果に含める（後で一括保存するため）
-        if isinstance(perf, dict) and "error" not in perf:
-            perf["_portfolio"] = portfolio.to_dict("records")  # 一時的に保存
-            return perf
-        return None
-    except Exception as e:
-        print(f"エラー ({rebalance_date}): {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 def _calculate_performance_single(
     rebalance_date: str,
     as_of_date: Optional[str],

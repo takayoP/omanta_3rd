@@ -29,7 +29,6 @@ import pandas as pd
 import optuna
 from optuna.visualization import plot_optimization_history, plot_param_importances
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
 import multiprocessing as mp
 import sqlite3
 import time
