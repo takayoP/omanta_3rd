@@ -6,68 +6,6 @@ import numpy as np
 import pandas as pd
 
 
-def _deprecated_calculate_cumulative_adjustment_factor(conn, code: str, target_date: str) -> float:
-    """
-    【非推奨・封印関数】累積調整係数（CAF: Cumulative Adjustment Factor）を計算
-
-    【警告】この関数は使用禁止です。呼び出すと例外を投げます。
-
-    現在の実装では、時価総額計算に未調整終値（close）を使用し、
-    株数はFY期末→評価日の分割倍率（_split_multiplier_between）で補正しているため、
-    このCAF（評価日より後の累積積）は不要です。
-
-    この関数は古いロジックの残骸であり、使用すると二重補正（株数も増やしたのに価格も調整）が
-    発生する可能性があります。
-
-    J-QuantsのAdjustmentFactorを使って、その日より後の調整係数の累積積を計算します。
-    例：1:2分割（AdjustmentFactor=0.5）が2024-01-01に発生した場合、
-    2023-12-31のCAFは0.5（将来の調整係数の累積積）
-
-    Args:
-        conn: データベース接続
-        code: 銘柄コード
-        target_date: 対象日（YYYY-MM-DD）
-
-    Returns:
-        累積調整係数（その日より後のAdjustmentFactorの累積積）
-        データがない場合は1.0を返す
-
-    Raises:
-        DeprecationWarning: この関数は使用禁止です
-    """
-    import warnings
-    warnings.warn(
-        "_calculate_cumulative_adjustment_factor is deprecated and should not be used. "
-        "Use _split_multiplier_between instead. This function causes double adjustment.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    df = pd.read_sql_query(
-        """
-        SELECT date, adjustment_factor
-        FROM prices_daily
-        WHERE code = ?
-          AND date > ?
-          AND adjustment_factor IS NOT NULL
-          AND adjustment_factor != 1.0
-        ORDER BY date ASC
-        """,
-        conn,
-        params=(code, target_date),
-    )
-
-    if df.empty:
-        return 1.0
-
-    caf = 1.0
-    for _, row in df.iterrows():
-        adj_factor = row["adjustment_factor"]
-        if pd.notna(adj_factor) and adj_factor > 0:
-            caf *= adj_factor
-
-    return caf
-
-
 def _get_shares_at_date(conn, code: str, target_date: str) -> tuple:
     """
     指定日の実際の発行済み株式数（自己株式除く）と純資産を取得
@@ -115,55 +53,6 @@ def _get_shares_at_date(conn, code: str, target_date: str) -> tuple:
         return np.nan, np.nan
 
     return shares_net, equity
-
-
-def _get_latest_basis_shares(conn, code: str, target_date: str, latest_date: str) -> float:
-    """
-    最新株数ベースの発行済み株式数を計算
-
-    AdjustmentFactor（株式分割/併合）と新規株式発行の両方を考慮して、
-    指定日の発行済み株式数を最新株数ベースに調整します。
-
-    Args:
-        conn: データベース接続
-        code: 銘柄コード
-        target_date: 対象日（YYYY-MM-DD）
-        latest_date: 最新期の日付（YYYY-MM-DD）
-
-    Returns:
-        最新株数ベースの発行済み株式数
-    """
-    shares_actual, _ = _get_shares_at_date(conn, code, target_date)
-
-    if pd.isna(shares_actual) or shares_actual <= 0:
-        return np.nan
-
-    caf = _deprecated_calculate_cumulative_adjustment_factor(conn, code, target_date)
-
-    if pd.isna(caf) or caf <= 0:
-        return np.nan
-
-    shares_adjusted = shares_actual / caf
-
-    latest_shares_actual, _ = _get_shares_at_date(conn, code, latest_date)
-
-    if pd.notna(latest_shares_actual) and latest_shares_actual > 0:
-        latest_caf = _deprecated_calculate_cumulative_adjustment_factor(conn, code, latest_date)
-
-        if pd.notna(latest_caf) and latest_caf > 0:
-            latest_shares_adjusted = latest_shares_actual / latest_caf
-
-            if latest_shares_adjusted > 0:
-                new_issue_ratio = latest_shares_adjusted / shares_adjusted
-                shares_latest_basis = shares_adjusted * new_issue_ratio
-            else:
-                shares_latest_basis = shares_adjusted
-        else:
-            shares_latest_basis = shares_adjusted
-    else:
-        shares_latest_basis = shares_adjusted
-
-    return shares_latest_basis
 
 
 def _get_shares_adjustment_factor(conn, code: str, period_end: str, latest_shares: float, latest_equity: float) -> float:
