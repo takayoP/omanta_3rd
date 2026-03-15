@@ -25,37 +25,6 @@ import pandas as pd
 from ..config.settings import EXECUTION_DATE
 from ..infra.db import connect_db, upsert
 
-# ---------------------------------------------------------------------------
-# Re-exports from feature modules（後方互換性維持）
-# ---------------------------------------------------------------------------
-from ..features.utils import (  # noqa: F401
-    _safe_div, _clip01, _pct_rank, _log_safe, _calc_slope,
-)
-from ..features.technicals import (  # noqa: F401
-    rsi_from_series as _rsi_from_series,
-    bb_zscore as _bb_zscore,
-    _entry_score_with_params,
-    _calculate_entry_score_with_params,
-)
-from ..features.adjustments import (  # noqa: F401
-    _deprecated_calculate_cumulative_adjustment_factor,
-    _split_multiplier_between,
-    _get_shares_at_date,
-    _get_latest_basis_shares,
-    _get_shares_adjustment_factor,
-)
-from ..features.loader import (  # noqa: F401
-    _snap_price_date,
-    _snap_listed_date,
-    _load_universe,
-    _load_prices_window,
-    _save_fy_to_statements,
-    _load_latest_fy,
-    _load_fy_history,
-    _load_latest_forecast,
-)
-
-
 # -----------------------------
 # Configuration
 # -----------------------------
