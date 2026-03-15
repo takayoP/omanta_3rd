@@ -1,11 +1,34 @@
 <map version="1.0.1">
 <!-- To view this file, download free mind mapping software FreeMind from http://freemind.sourceforge.net -->
 <node CREATED="1700000000000" ID="ID_ROOT" MODIFIED="1700000000000" TEXT="投資アルゴリズム 実行コマンド体系">
-<node CREATED="1700000000001" ID="ID_1" MODIFIED="1700000000001" POSITION="right" TEXT="1. データベース初期化">
-<node CREATED="1700000000002" ID="ID_1_1" MODIFIED="1700000000002" TEXT="python -m omanta_3rd.jobs.init_db"/>
-<node CREATED="1700000000003" ID="ID_1_2" MODIFIED="1700000000003" TEXT="機能: データベーススキーマとインデックスを作成"/>
+<node CREATED="1700000000001" ID="ID_1" MODIFIED="1700000000001" POSITION="right" TEXT="1. データベース・マイグレーション">
+<node CREATED="1700000000002" ID="ID_1_1" MODIFIED="1700000000002" TEXT="init_db">
+<node CREATED="1700000000003" ID="ID_1_1_1" MODIFIED="1700000000003" TEXT="python -m omanta_3rd.jobs.init_db"/>
+<node CREATED="1700000000299" ID="ID_1_1_2" MODIFIED="1700000000299" TEXT="機能: スキーマとインデックス作成"/>
 </node>
-<node CREATED="1700000000004" ID="ID_2" MODIFIED="1700000000004" POSITION="right" TEXT="2. データ更新（ETL）">
+<node CREATED="1700000000300" ID="ID_1_2" MODIFIED="1700000000300" TEXT="run_migration（マイグレーション実行）">
+<node CREATED="1700000000301" ID="ID_1_2_1" MODIFIED="1700000000301" TEXT="python -m omanta_3rd.jobs.run_migration sql/migration_add_ref_scores_to_features.sql"/>
+<node CREATED="1700000000302" ID="ID_1_2_2" MODIFIED="1700000000302" TEXT="python -m omanta_3rd.jobs.run_migration sql/migration_add_strategy_runs_tables.sql"/>
+<node CREATED="1700000000303" ID="ID_1_2_3" MODIFIED="1700000000303" TEXT="引数: マイグレーションSQLファイルパス（省略時はデフォルト）"/>
+</node>
+</node>
+<node CREATED="1700000000310" ID="ID_1v1" MODIFIED="1700000000310" POSITION="right" TEXT="2. メインコマンド（特徴量・選定・最適化）">
+<node CREATED="1700000000311" ID="ID_1v1_1" MODIFIED="1700000000311" TEXT="prepare_features（特徴量・ref score 計算）">
+<node CREATED="1700000000312" ID="ID_1v1_1_1" MODIFIED="1700000000312" TEXT="python -m omanta_3rd.jobs.prepare_features --asof 2024-12-31"/>
+<node CREATED="1700000000313" ID="ID_1v1_1_2" MODIFIED="1700000000313" TEXT="python -m omanta_3rd.jobs.prepare_features --start 2021-01-01 --end 2024-12-31"/>
+<node CREATED="1700000000314" ID="ID_1v1_1_3" MODIFIED="1700000000314" TEXT="オプション: --asof（単日）または --start/--end（一括）, --score-profile（デフォルト: v1_ref）"/>
+</node>
+<node CREATED="1700000000315" ID="ID_1v1_2" MODIFIED="1700000000315" TEXT="run_strategy（選定のみ）">
+<node CREATED="1700000000316" ID="ID_1v1_2_1" MODIFIED="1700000000316" TEXT="python -m omanta_3rd.jobs.run_strategy --mode monthly --asof 2024-12-31"/>
+<node CREATED="1700000000317" ID="ID_1v1_2_2" MODIFIED="1700000000317" TEXT="python -m omanta_3rd.jobs.run_strategy --mode monthly --start 2021-01-01 --end 2024-12-31"/>
+<node CREATED="1700000000318" ID="ID_1v1_2_3" MODIFIED="1700000000318" TEXT="オプション: --mode longterm|monthly, --asof または --start/--end, --no-save-new"/>
+</node>
+<node CREATED="1700000000319" ID="ID_1v1_3" MODIFIED="1700000000319" TEXT="optimize_strategy（月次最適化・PolicyParams 6 個）">
+<node CREATED="1700000000320" ID="ID_1v1_3_1" MODIFIED="1700000000320" TEXT="python -m omanta_3rd.jobs.optimize_strategy --start 2021-01-01 --end 2024-12-31 --n-trials 20 --study-name v1_study"/>
+<node CREATED="1700000000321" ID="ID_1v1_3_2" MODIFIED="1700000000321" TEXT="オプション: --start/--end 必須, --n-trials, --study-name, --cost-bps, --n-jobs"/>
+</node>
+</node>
+<node CREATED="1700000000004" ID="ID_2" MODIFIED="1700000000004" POSITION="right" TEXT="3. データ更新（ETL）">
 <node CREATED="1700000000005" ID="ID_2_1" MODIFIED="1700000000005" TEXT="etl_update.py">
 <node CREATED="1700000000006" ID="ID_2_1_1" MODIFIED="1700000000006" TEXT="基本コマンド">
 <node CREATED="1700000000007" ID="ID_2_1_1_1" MODIFIED="1700000000007" TEXT="python -m omanta_3rd.jobs.etl_update --target listed"/>
@@ -34,20 +57,17 @@
 </node>
 </node>
 </node>
-<node CREATED="1700000000026" ID="ID_3" MODIFIED="1700000000026" POSITION="right" TEXT="3. 長期保有型の運用">
-<node CREATED="1700000000027" ID="ID_3_1" MODIFIED="1700000000027" TEXT="monthly_run.py（月次実行）">
+<node CREATED="1700000000026" ID="ID_3" MODIFIED="1700000000026" POSITION="right" TEXT="4. 長期保有型の運用">
+<node CREATED="1700000000027" ID="ID_3_1" MODIFIED="1700000000027" TEXT="longterm_run.py（月次実行）">
 <node CREATED="1700000000028" ID="ID_3_1_1" MODIFIED="1700000000028" TEXT="基本コマンド">
-<node CREATED="1700000000029" ID="ID_3_1_1_1" MODIFIED="1700000000029" TEXT="python -m omanta_3rd.jobs.monthly_run"/>
-<node CREATED="1700000000030" ID="ID_3_1_1_2" MODIFIED="1700000000030" TEXT="python -m omanta_3rd.jobs.monthly_run --asof 2025-12-19"/>
+<node CREATED="1700000000029" ID="ID_3_1_1_1" MODIFIED="1700000000029" TEXT="python -m omanta_3rd.jobs.longterm_run --asof 2025-12-19"/>
 </node>
-<node CREATED="1700000000031" ID="ID_3_1_2" MODIFIED="1700000000031" TEXT="オプション">
-<node CREATED="1700000000032" ID="ID_3_1_2_1" MODIFIED="1700000000032" TEXT="--asof: 基準日（YYYY-MM-DD、デフォルト: 今日）"/>
+<node CREATED="1700000000031" ID="ID_3_1_2" MODIFIED="1700000000031" TEXT="オプション: --asof（基準日 YYYY-MM-DD）"/>
+<node CREATED="1700000000033" ID="ID_3_1_3" MODIFIED="1700000000033" TEXT="機能: 特徴量計算・スクリーニング・portfolio_monthly 保存（参考）"/>
 </node>
-<node CREATED="1700000000033" ID="ID_3_1_3" MODIFIED="1700000000033" TEXT="機能">
-<node CREATED="1700000000034" ID="ID_3_1_3_1" MODIFIED="1700000000034" TEXT="特徴量計算"/>
-<node CREATED="1700000000035" ID="ID_3_1_3_2" MODIFIED="1700000000035" TEXT="スクリーニング"/>
-<node CREATED="1700000000036" ID="ID_3_1_3_3" MODIFIED="1700000000036" TEXT="portfolio_monthlyに保存（参考情報）"/>
-</node>
+<node CREATED="1700000000330" ID="ID_3_1b" MODIFIED="1700000000330" TEXT="batch_longterm_run.py（期間一括）">
+<node CREATED="1700000000331" ID="ID_3_1b_1" MODIFIED="1700000000331" TEXT="python -m omanta_3rd.jobs.batch_longterm_run --start 2016-01-01 --end 2025-12-28"/>
+<node CREATED="1700000000332" ID="ID_3_1b_2" MODIFIED="1700000000332" TEXT="オプション: --no-performance, --as-of-date, --no-skip-existing"/>
 </node>
 <node CREATED="1700000000037" ID="ID_3_2" MODIFIED="1700000000037" TEXT="backtest.py（バックテスト・月次リバランス用）">
 <node CREATED="1700000000038" ID="ID_3_2_1" MODIFIED="1700000000038" TEXT="基本コマンド（月次リバランス用）">
@@ -55,7 +75,7 @@
 <node CREATED="1700000000040" ID="ID_3_2_1_2" MODIFIED="1700000000040" TEXT="python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19"/>
 <node CREATED="1700000000041" ID="ID_3_2_1_3" MODIFIED="1700000000041" TEXT="python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --as-of-date 2025-12-20"/>
 <node CREATED="1700000000042" ID="ID_3_2_1_4" MODIFIED="1700000000042" TEXT="python -m omanta_3rd.jobs.backtest --save-to-db"/>
-<node CREATED="1700000000042_1" ID="ID_3_2_1_5" MODIFIED="1700000000042_1" TEXT="python -m omanta_3rd.jobs.backtest --format csv --output backtest_results.csv"/>
+<node CREATED="1700000003042" ID="ID_3_2_1_5" MODIFIED="1700000003042" TEXT="python -m omanta_3rd.jobs.backtest --format csv --output backtest_results.csv"/>
 </node>
 <node CREATED="1700000000043" ID="ID_3_2_2" MODIFIED="1700000000043" TEXT="オプション">
 <node CREATED="1700000000044" ID="ID_3_2_2_1" MODIFIED="1700000000044" TEXT="--rebalance-date: リバランス日（YYYY-MM-DD、未指定で全ポートフォリオ）"/>
@@ -65,24 +85,10 @@
 <node CREATED="1700000000048" ID="ID_3_2_2_5" MODIFIED="1700000000048" TEXT="--save-to-db: パフォーマンス結果をDBに保存"/>
 </node>
 </node>
-<node CREATED="1700000000049" ID="ID_3_3" MODIFIED="1700000000049" TEXT="optimize_longterm.py（長期保有型最適化）">
-<node CREATED="1700000000049_1" ID="ID_3_3_0_1" MODIFIED="1700000000049_1" TEXT="基本コマンド">
-<node CREATED="1700000000049_2" ID="ID_3_3_0_2" MODIFIED="1700000000049_2" TEXT="python -m omanta_3rd.jobs.optimize_longterm --start 2021-01-01 --end 2024-12-31 --study-type A --n-trials 200"/>
-</node>
-<node CREATED="1700000000049_3" ID="ID_3_3_0_3" MODIFIED="1700000000049_3" TEXT="必須オプション">
-<node CREATED="1700000000049_4" ID="ID_3_3_0_4" MODIFIED="1700000000049_4" TEXT="--start: 開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000049_5" ID="ID_3_3_0_5" MODIFIED="1700000000049_5" TEXT="--end: 終了日（YYYY-MM-DD）"/>
-<node CREATED="1700000000049_6" ID="ID_3_3_0_6" MODIFIED="1700000000049_6" TEXT="--study-type: A/B/C（A: BB寄り・低ROE、B: Value寄り・ROE高め、C: 統合・広範囲）"/>
-</node>
-<node CREATED="1700000000049_7" ID="ID_3_3_0_7" MODIFIED="1700000000049_7" TEXT="主要オプション">
-<node CREATED="1700000000049_8" ID="ID_3_3_0_8" MODIFIED="1700000000049_8" TEXT="--n-trials: 試行回数（デフォルト: 200）"/>
-<node CREATED="1700000000049_9" ID="ID_3_3_0_9" MODIFIED="1700000000049_9" TEXT="--study-name: スタディ名（自動生成可）"/>
-<node CREATED="1700000000049_10" ID="ID_3_3_0_10" MODIFIED="1700000000049_10" TEXT="--n-jobs: trial並列数（-1で自動）"/>
-<node CREATED="1700000000049_11" ID="ID_3_3_0_11" MODIFIED="1700000000049_11" TEXT="--bt-workers: バックテスト並列数（-1で自動）"/>
-<node CREATED="1700000000049_12" ID="ID_3_3_0_12" MODIFIED="1700000000049_12" TEXT="--cost-bps: 取引コスト（bps、デフォルト: 0.0）"/>
-<node CREATED="1700000000049_13" ID="ID_3_3_0_13" MODIFIED="1700000000049_13" TEXT="--train-ratio: 学習データ割合（デフォルト: 0.8）"/>
-<node CREATED="1700000000049_14" ID="ID_3_3_0_14" MODIFIED="1700000000049_14" TEXT="--random-seed: ランダムシード（デフォルト: 42）"/>
-</node>
+<node CREATED="1700000003053" ID="ID_3_3b" MODIFIED="1700000003053" TEXT="calculate_all_performance.py（パフォーマンス一括）">
+<node CREATED="1700000003054" ID="ID_3_3b_1" MODIFIED="1700000003054" TEXT="python -m omanta_3rd.jobs.calculate_all_performance"/>
+<node CREATED="1700000003055" ID="ID_3_3b_2" MODIFIED="1700000003055" TEXT="python -m omanta_3rd.jobs.calculate_all_performance --as-of-date 2025-12-28"/>
+<node CREATED="1700000003056" ID="ID_3_3b_3" MODIFIED="1700000003056" TEXT="オプション: --as-of-date, --start/--end"/>
 </node>
 <node CREATED="1700000000050" ID="ID_3_4" MODIFIED="1700000000050" TEXT="保有銘柄管理">
 <node CREATED="1700000000051" ID="ID_3_4_1" MODIFIED="1700000000051" TEXT="add_holding.py: 保有追加"/>
@@ -90,160 +96,19 @@
 <node CREATED="1700000000053" ID="ID_3_4_3" MODIFIED="1700000000053" TEXT="update_holdings.py: 更新"/>
 </node>
 </node>
-<node CREATED="1700000000054" ID="ID_4" MODIFIED="1700000000054" POSITION="right" TEXT="4. 月次リバランス型の運用">
-<node CREATED="1700000000055" ID="ID_4_1" MODIFIED="1700000000055" TEXT="optimize_timeseries.py（時系列最適化・推奨）">
-<node CREATED="1700000000055" ID="ID_4_1_1" MODIFIED="1700000000055" TEXT="基本コマンド">
-<node CREATED="1700000000056" ID="ID_4_1_1_1" MODIFIED="1700000000056" TEXT="python -m omanta_3rd.jobs.optimize_timeseries --start 2021-01-01 --end 2024-12-31 --n-trials 200"/>
+<node CREATED="1700000000133" ID="ID_5" MODIFIED="1700000000133" POSITION="left" TEXT="5. 可視化・補助スクリプト">
+<node CREATED="1700000000162" ID="ID_5_1" MODIFIED="1700000000162" TEXT="visualize_holdings_details.py … python visualize_holdings_details.py"/>
+<node CREATED="1700000000165" ID="ID_5_2" MODIFIED="1700000000165" TEXT="visualize_equity_curve_and_holdings.py … 資産曲線・保有銘柄推移"/>
+<node CREATED="1700000000168" ID="ID_5_3" MODIFIED="1700000000168" TEXT="visualize_optimization.py … 最適化結果の可視化"/>
+<node CREATED="1700000001680" ID="ID_5_4" MODIFIED="1700000001680" TEXT="visualize_holdings_overlap.py … 保有銘柄の重複可視化"/>
 </node>
-<node CREATED="1700000000057" ID="ID_4_1_2" MODIFIED="1700000000057" TEXT="必須オプション">
-<node CREATED="1700000000058" ID="ID_4_1_2_1" MODIFIED="1700000000058" TEXT="--start: 開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000059" ID="ID_4_1_2_2" MODIFIED="1700000000059" TEXT="--end: 終了日（YYYY-MM-DD）"/>
+<node CREATED="1700000001690" ID="ID_6b" MODIFIED="1700000001690" POSITION="left" TEXT="6. シェル・バッチ（.ps1 / .bat）">
+<node CREATED="1700000001691" ID="ID_6b_1" MODIFIED="1700000001691" TEXT="run_optimization_with_cache_rebuild.ps1: 最適化＋キャッシュ再構築"/>
+<node CREATED="1700000001694" ID="ID_6b_4" MODIFIED="1700000001694" TEXT="run_2025_live_evaluation.ps1 / .bat: 疑似ライブ評価"/>
 </node>
-<node CREATED="1700000000060" ID="ID_4_1_3" MODIFIED="1700000000060" TEXT="主要オプション">
-<node CREATED="1700000000061" ID="ID_4_1_3_1" MODIFIED="1700000000061" TEXT="--n-trials: 試行回数（デフォルト: 50）"/>
-<node CREATED="1700000000062" ID="ID_4_1_3_2" MODIFIED="1700000000062" TEXT="--study-name: スタディ名（自動生成可）"/>
-<node CREATED="1700000000063" ID="ID_4_1_3_3" MODIFIED="1700000000063" TEXT="--parallel-mode: trial/backtest/hybrid（デフォルト: trial）"/>
-<node CREATED="1700000000064" ID="ID_4_1_3_4" MODIFIED="1700000000064" TEXT="--n-jobs: trial並列数（-1で自動、SQLite環境では2-4推奨）"/>
-<node CREATED="1700000000065" ID="ID_4_1_3_5" MODIFIED="1700000000065" TEXT="--bt-workers: バックテスト並列数（-1で自動）"/>
-<node CREATED="1700000000066" ID="ID_4_1_3_6" MODIFIED="1700000000066" TEXT="--cost: 取引コスト（bps、デフォルト: 0.0）"/>
-</node>
-<node CREATED="1700000000067" ID="ID_4_1_4" MODIFIED="1700000000067" TEXT="その他オプション">
-<node CREATED="1700000000068" ID="ID_4_1_4_1" MODIFIED="1700000000068" TEXT="--storage: Optunaストレージ（デフォルト: SQLite）"/>
-<node CREATED="1700000000069" ID="ID_4_1_4_2" MODIFIED="1700000000069" TEXT="--no-progress-window: 進捗ウィンドウ非表示"/>
-<node CREATED="1700000000070" ID="ID_4_1_4_3" MODIFIED="1700000000070" TEXT="--no-db-write: DB書き込み無効"/>
-<node CREATED="1700000000071" ID="ID_4_1_4_4" MODIFIED="1700000000071" TEXT="--cache-dir: キャッシュディレクトリ（デフォルト: cache/features）"/>
-</node>
-<node CREATED="1700000000072" ID="ID_4_1_5" MODIFIED="1700000000072" TEXT="実行例（Windows PowerShell）">
-<node CREATED="1700000000073" ID="ID_4_1_5_1" MODIFIED="1700000000073" TEXT="$env:OMP_NUM_THREADS=&quot;1&quot;"/>
-<node CREATED="1700000000074" ID="ID_4_1_5_2" MODIFIED="1700000000074" TEXT="$env:MKL_NUM_THREADS=&quot;1&quot;"/>
-<node CREATED="1700000000075" ID="ID_4_1_5_3" MODIFIED="1700000000075" TEXT="$env:OPENBLAS_NUM_THREADS=&quot;1&quot;"/>
-<node CREATED="1700000000076" ID="ID_4_1_5_4" MODIFIED="1700000000076" TEXT="$env:NUMEXPR_NUM_THREADS=&quot;1&quot;"/>
-<node CREATED="1700000000077" ID="ID_4_1_5_5" MODIFIED="1700000000077" TEXT="python -m omanta_3rd.jobs.optimize_timeseries --start 2021-01-01 --end 2024-12-31 --n-trials 200 --n-jobs 4 --no-progress-window"/>
-</node>
-</node>
-<node CREATED="1700000000093" ID="ID_4_2" MODIFIED="1700000000093" TEXT="robust_optimize_timeseries.py（信頼性向上型）">
-<node CREATED="1700000000094" ID="ID_4_3_1" MODIFIED="1700000000094" TEXT="基本コマンド">
-<node CREATED="1700000000095" ID="ID_4_3_1_1" MODIFIED="1700000000095" TEXT="python -m omanta_3rd.jobs.robust_optimize_timeseries --start 2021-01-01 --end 2024-12-31 --n-trials 20 --folds 3"/>
-</node>
-<node CREATED="1700000000096" ID="ID_4_3_2" MODIFIED="1700000000096" TEXT="必須オプション">
-<node CREATED="1700000000097" ID="ID_4_3_2_1" MODIFIED="1700000000097" TEXT="--start: 開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000098" ID="ID_4_3_2_2" MODIFIED="1700000000098" TEXT="--end: 終了日（YYYY-MM-DD）"/>
-</node>
-<node CREATED="1700000000099" ID="ID_4_3_3" MODIFIED="1700000000099" TEXT="主要オプション">
-<node CREATED="1700000000100" ID="ID_4_3_3_1" MODIFIED="1700000000100" TEXT="--n-trials: 試行回数（推奨: 10-20、デフォルト: 50）"/>
-<node CREATED="1700000000101" ID="ID_4_3_3_2" MODIFIED="1700000000101" TEXT="--folds: WFAのfold数（デフォルト: 3）"/>
-<node CREATED="1700000000102" ID="ID_4_3_3_3" MODIFIED="1700000000102" TEXT="--train-min-years: 最小Train期間（年、デフォルト: 2.0）"/>
-<node CREATED="1700000000103" ID="ID_4_3_3_4" MODIFIED="1700000000103" TEXT="--buy-cost: 購入コスト（bps、デフォルト: 0.0）"/>
-<node CREATED="1700000000104" ID="ID_4_3_3_5" MODIFIED="1700000000104" TEXT="--sell-cost: 売却コスト（bps、デフォルト: 0.0）"/>
-<node CREATED="1700000000105" ID="ID_4_3_3_6" MODIFIED="1700000000105" TEXT="--stability-weight: 安定性の重み（0.0-1.0、デフォルト: 0.3）"/>
-<node CREATED="1700000000106" ID="ID_4_3_3_7" MODIFIED="1700000000106" TEXT="--seed: 乱数シード"/>
-</node>
-</node>
-<node CREATED="1700000000107" ID="ID_4_4" MODIFIED="1700000000107" TEXT="holdout_eval_timeseries.py（Holdout評価）">
-<node CREATED="1700000000108" ID="ID_4_4_1" MODIFIED="1700000000108" TEXT="基本コマンド">
-<node CREATED="1700000000109" ID="ID_4_4_1_1" MODIFIED="1700000000109" TEXT="python -m omanta_3rd.jobs.holdout_eval_timeseries --train-start 2021-01-01 --train-end 2023-12-31 --holdout-start 2024-01-01 --holdout-end 2024-12-31"/>
-</node>
-<node CREATED="1700000000110" ID="ID_4_4_2" MODIFIED="1700000000110" TEXT="必須オプション">
-<node CREATED="1700000000111" ID="ID_4_4_2_1" MODIFIED="1700000000111" TEXT="--train-start: Train開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000112" ID="ID_4_4_2_2" MODIFIED="1700000000112" TEXT="--train-end: Train終了日（YYYY-MM-DD）"/>
-<node CREATED="1700000000113" ID="ID_4_4_2_3" MODIFIED="1700000000113" TEXT="--holdout-start: Holdout開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000114" ID="ID_4_4_2_4" MODIFIED="1700000000114" TEXT="--holdout-end: Holdout終了日（YYYY-MM-DD）"/>
-</node>
-<node CREATED="1700000000115" ID="ID_4_4_3" MODIFIED="1700000000115" TEXT="主要オプション">
-<node CREATED="1700000000116" ID="ID_4_4_3_1" MODIFIED="1700000000116" TEXT="--n-trials: 試行回数（デフォルト: 50）"/>
-<node CREATED="1700000000117" ID="ID_4_4_3_2" MODIFIED="1700000000117" TEXT="--buy-cost: 購入コスト（bps、デフォルト: 0.0）"/>
-<node CREATED="1700000000118" ID="ID_4_4_3_3" MODIFIED="1700000000118" TEXT="--sell-cost: 売却コスト（bps、デフォルト: 0.0）"/>
-<node CREATED="1700000000119" ID="ID_4_4_3_4" MODIFIED="1700000000119" TEXT="--seed: 乱数シード"/>
-</node>
-</node>
-<node CREATED="1700000000120" ID="ID_4_5" MODIFIED="1700000000120" TEXT="walk_forward_timeseries.py（WFA評価）">
-<node CREATED="1700000000121" ID="ID_4_5_1" MODIFIED="1700000000121" TEXT="基本コマンド">
-<node CREATED="1700000000122" ID="ID_4_5_1_1" MODIFIED="1700000000122" TEXT="python -m omanta_3rd.jobs.walk_forward_timeseries --start 2021-01-01 --end 2024-12-31 --folds 3"/>
-</node>
-<node CREATED="1700000000123" ID="ID_4_5_2" MODIFIED="1700000000123" TEXT="必須オプション">
-<node CREATED="1700000000124" ID="ID_4_5_2_1" MODIFIED="1700000000124" TEXT="--start: 開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000125" ID="ID_4_5_2_2" MODIFIED="1700000000125" TEXT="--end: 終了日（YYYY-MM-DD）"/>
-</node>
-<node CREATED="1700000000126" ID="ID_4_5_3" MODIFIED="1700000000126" TEXT="主要オプション">
-<node CREATED="1700000000127" ID="ID_4_5_3_1" MODIFIED="1700000000127" TEXT="--folds: fold数（デフォルト: 3）"/>
-<node CREATED="1700000000128" ID="ID_4_5_3_2" MODIFIED="1700000000128" TEXT="--train-min-years: 最小Train期間（年、デフォルト: 2.0）"/>
-<node CREATED="1700000000129" ID="ID_4_5_3_3" MODIFIED="1700000000129" TEXT="--n-trials: 試行回数（デフォルト: 50）"/>
-<node CREATED="1700000000130" ID="ID_4_5_3_4" MODIFIED="1700000000130" TEXT="--buy-cost: 購入コスト（bps）"/>
-<node CREATED="1700000000131" ID="ID_4_5_3_5" MODIFIED="1700000000131" TEXT="--sell-cost: 売却コスト（bps）"/>
-<node CREATED="1700000000132" ID="ID_4_5_3_6" MODIFIED="1700000000132" TEXT="--seed: 乱数シード"/>
-</node>
-</node>
-</node>
-<node CREATED="1700000000133" ID="ID_5" MODIFIED="1700000000133" POSITION="left" TEXT="5. 【月次リバランス用】評価・検証スクリプト">
-<node CREATED="1700000000134" ID="ID_5_1" MODIFIED="1700000000134" TEXT="evaluate_candidates_holdout.py（月次リバランス用）">
-<node CREATED="1700000000135" ID="ID_5_1_1" MODIFIED="1700000000135" TEXT="基本コマンド">
-<node CREATED="1700000000136" ID="ID_5_1_1_1" MODIFIED="1700000000136" TEXT="python evaluate_candidates_holdout.py --candidates candidates_studyB_20251231_174014.json --holdout-start 2023-01-01 --holdout-end 2024-12-31 --cost-bps 0.0 --output holdout_results_with_holdings.json --use-cache"/>
-</node>
-<node CREATED="1700000000134_1" ID="ID_5_1_0" MODIFIED="1700000000134_1" TEXT="その他の評価スクリプト（月次リバランス用）">
-<node CREATED="1700000000134_2" ID="ID_5_1_0_1" MODIFIED="1700000000134_2" TEXT="evaluate_monthly_params_on_longterm.py: 月次パラメータの長期評価"/>
-<node CREATED="1700000000134_3" ID="ID_5_1_0_2" MODIFIED="1700000000134_3" TEXT="evaluate_200trial_results.py: 200 trial結果の評価"/>
-<node CREATED="1700000000134_4" ID="ID_5_1_0_3" MODIFIED="1700000000134_4" TEXT="evaluate_pilot_results.py: パイロット結果の評価"/>
-</node>
-<node CREATED="1700000000137" ID="ID_5_1_2" MODIFIED="1700000000137" TEXT="必須オプション">
-<node CREATED="1700000000138" ID="ID_5_1_2_1" MODIFIED="1700000000138" TEXT="--candidates: 候補JSONファイル"/>
-<node CREATED="1700000000139" ID="ID_5_1_2_2" MODIFIED="1700000000139" TEXT="--holdout-start: Holdout開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000140" ID="ID_5_1_2_3" MODIFIED="1700000000140" TEXT="--holdout-end: Holdout終了日（YYYY-MM-DD）"/>
-</node>
-<node CREATED="1700000000141" ID="ID_5_1_3" MODIFIED="1700000000141" TEXT="主要オプション">
-<node CREATED="1700000000142" ID="ID_5_1_3_1" MODIFIED="1700000000142" TEXT="--cost-bps: 取引コスト（bps、デフォルト: 0.0）"/>
-<node CREATED="1700000000143" ID="ID_5_1_3_2" MODIFIED="1700000000143" TEXT="--output: 出力JSONファイル"/>
-<node CREATED="1700000000144" ID="ID_5_1_3_3" MODIFIED="1700000000144" TEXT="--use-cache: キャッシュ使用"/>
-</node>
-<node CREATED="1700000000145" ID="ID_5_1_4" MODIFIED="1700000000145" TEXT="機能">
-<node CREATED="1700000000146" ID="ID_5_1_4_1" MODIFIED="1700000000146" TEXT="候補パラメータでHoldout期間を評価"/>
-<node CREATED="1700000000147" ID="ID_5_1_4_2" MODIFIED="1700000000147" TEXT="ポートフォリオ情報と保有銘柄詳細をJSONに保存"/>
-<node CREATED="1700000000148" ID="ID_5_1_4_3" MODIFIED="1700000000148" TEXT="詳細メトリクス（年別Sharpe、CAGR、MaxDD、ターンオーバー等）を計算"/>
-</node>
-</node>
-<node CREATED="1700000000149" ID="ID_5_2" MODIFIED="1700000000149" TEXT="evaluate_cost_sensitivity.py（月次リバランス用）">
-<node CREATED="1700000000150" ID="ID_5_2_1" MODIFIED="1700000000150" TEXT="基本コマンド">
-<node CREATED="1700000000151" ID="ID_5_2_1_1" MODIFIED="1700000000151" TEXT="python evaluate_cost_sensitivity.py --candidates candidates_studyB_20251231_174014.json --holdout-start 2023-01-01 --holdout-end 2024-12-31 --cost-levels 0 10 20 30 --output cost_sensitivity_analysis.json"/>
-</node>
-<node CREATED="1700000000152" ID="ID_5_2_2" MODIFIED="1700000000152" TEXT="必須オプション">
-<node CREATED="1700000000153" ID="ID_5_2_2_1" MODIFIED="1700000000153" TEXT="--candidates: 候補JSONファイル"/>
-<node CREATED="1700000000154" ID="ID_5_2_2_2" MODIFIED="1700000000154" TEXT="--holdout-start: Holdout開始日（YYYY-MM-DD）"/>
-<node CREATED="1700000000155" ID="ID_5_2_2_3" MODIFIED="1700000000155" TEXT="--holdout-end: Holdout終了日（YYYY-MM-DD）"/>
-<node CREATED="1700000000156" ID="ID_5_2_2_4" MODIFIED="1700000000156" TEXT="--cost-levels: コストレベル（bps、複数指定可）"/>
-<node CREATED="1700000000157" ID="ID_5_2_2_5" MODIFIED="1700000000157" TEXT="--output: 出力JSONファイル"/>
-</node>
-<node CREATED="1700000000158" ID="ID_5_2_3" MODIFIED="1700000000158" TEXT="機能">
-<node CREATED="1700000000159" ID="ID_5_2_3_1" MODIFIED="1700000000159" TEXT="複数のコストレベルでパフォーマンスを評価"/>
-<node CREATED="1700000000160" ID="ID_5_2_3_2" MODIFIED="1700000000160" TEXT="コスト感度分析結果をJSONに保存"/>
-</node>
-</node>
-</node>
-<node CREATED="1700000000161" ID="ID_6" MODIFIED="1700000000161" POSITION="left" TEXT="6. 【月次リバランス用】可視化スクリプト">
-<node CREATED="1700000000162" ID="ID_6_1" MODIFIED="1700000000162" TEXT="visualize_holdings_details.py（月次リバランス用）">
-<node CREATED="1700000000163" ID="ID_6_1_1" MODIFIED="1700000000163" TEXT="機能: 保有銘柄の詳細情報を可視化（月次リバランス用）"/>
-<node CREATED="1700000000164" ID="ID_6_1_2" MODIFIED="1700000000164" TEXT="実行: python visualize_holdings_details.py"/>
-</node>
-<node CREATED="1700000000165" ID="ID_6_2" MODIFIED="1700000000165" TEXT="visualize_equity_curve_and_holdings.py（月次リバランス用）">
-<node CREATED="1700000000166" ID="ID_6_2_1" MODIFIED="1700000000166" TEXT="機能: 資産曲線と保有銘柄の推移を可視化（月次リバランス用）"/>
-<node CREATED="1700000000167" ID="ID_6_2_2" MODIFIED="1700000000167" TEXT="実行: python visualize_equity_curve_and_holdings.py"/>
-</node>
-<node CREATED="1700000000168" ID="ID_6_3" MODIFIED="1700000000168" TEXT="visualize_optimization.py（月次リバランス用）">
-<node CREATED="1700000000169" ID="ID_6_3_1" MODIFIED="1700000000169" TEXT="機能: 最適化結果を可視化（月次リバランス用）"/>
-<node CREATED="1700000000170" ID="ID_6_3_2" MODIFIED="1700000000170" TEXT="実行: python visualize_optimization.py"/>
-</node>
-<node CREATED="1700000000168_1" ID="ID_6_4" MODIFIED="1700000000168_1" TEXT="visualize_holdings_overlap.py（月次リバランス用）">
-<node CREATED="1700000000169_1" ID="ID_6_4_1" MODIFIED="1700000000169_1" TEXT="機能: 保有銘柄の重複可視化（月次リバランス用）"/>
-<node CREATED="1700000000170_1" ID="ID_6_4_2" MODIFIED="1700000000170_1" TEXT="実行: python visualize_holdings_overlap.py"/>
-</node>
-</node>
-<node CREATED="1700000000171" ID="ID_7" MODIFIED="1700000000171" POSITION="left" TEXT="7. 【月次リバランス用】データベース保存スクリプト">
-<node CREATED="1700000000172" ID="ID_7_1" MODIFIED="1700000000172" TEXT="save_final_candidates_to_db.py（月次リバランス用）">
-<node CREATED="1700000000173" ID="ID_7_1_1" MODIFIED="1700000000173" TEXT="機能: 最終選定候補のパラメータとパフォーマンスをDBに保存（月次リバランス用）"/>
-<node CREATED="1700000000174" ID="ID_7_1_2" MODIFIED="1700000000174" TEXT="実行: python save_final_candidates_to_db.py"/>
-</node>
-<node CREATED="1700000000175" ID="ID_7_2" MODIFIED="1700000000175" TEXT="save_performance_time_series_to_db.py（月次リバランス用）">
-<node CREATED="1700000000176" ID="ID_7_2_1" MODIFIED="1700000000176" TEXT="機能: 月次超過リターン等の時系列データをDBに保存（月次リバランス用）"/>
-<node CREATED="1700000000177" ID="ID_7_2_2" MODIFIED="1700000000177" TEXT="実行: python save_performance_time_series_to_db.py"/>
-</node>
+<node CREATED="1700000000171" ID="ID_7" MODIFIED="1700000000171" POSITION="left" TEXT="7. データベース保存スクリプト">
+<node CREATED="1700000000172" ID="ID_7_1" MODIFIED="1700000000172" TEXT="save_final_candidates_to_db.py … 選定候補・パフォーマンスをDB保存"/>
+<node CREATED="1700000000175" ID="ID_7_2" MODIFIED="1700000000175" TEXT="save_performance_time_series_to_db.py … 時系列データをDB保存"/>
 </node>
 <node CREATED="1700000000178" ID="ID_8" MODIFIED="1700000000178" POSITION="left" TEXT="8. 環境変数設定（Windows PowerShell）">
 <node CREATED="1700000000179" ID="ID_8_1" MODIFIED="1700000000179" TEXT="BLASスレッド設定（並列化制御）">
@@ -259,29 +124,23 @@
 </node>
 </node>
 <node CREATED="1700000000188" ID="ID_9" MODIFIED="1700000000188" POSITION="left" TEXT="9. ワークフロー例">
+<node CREATED="1700000001880" ID="ID_9_0" MODIFIED="1700000001880" TEXT="メインワークフロー（月次リバランス型）">
+<node CREATED="1700000001881" ID="ID_9_0_1" MODIFIED="1700000001881" TEXT="1. マイグレーション: run_migration（ref_scores, strategy_runs テーブル）"/>
+<node CREATED="1700000001882" ID="ID_9_0_2" MODIFIED="1700000001882" TEXT="2. 特徴量: prepare_features --asof または --start/--end"/>
+<node CREATED="1700000001883" ID="ID_9_0_3" MODIFIED="1700000001883" TEXT="3. 選定: run_strategy --mode monthly --asof または --start/--end"/>
+<node CREATED="1700000001884" ID="ID_9_0_4" MODIFIED="1700000001884" TEXT="4. 最適化: optimize_strategy --start/--end --n-trials"/>
+</node>
 <node CREATED="1700000000189" ID="ID_9_1" MODIFIED="1700000000189" TEXT="データ更新ワークフロー">
 <node CREATED="1700000000190" ID="ID_9_1_1" MODIFIED="1700000000190" TEXT="1. python update_all_data.py --target listed"/>
 <node CREATED="1700000000191" ID="ID_9_1_2" MODIFIED="1700000000191" TEXT="2. python update_all_data.py --target prices"/>
 <node CREATED="1700000000192" ID="ID_9_1_3" MODIFIED="1700000000192" TEXT="3. python update_all_data.py --target fins"/>
 <node CREATED="1700000000193" ID="ID_9_1_4" MODIFIED="1700000000193" TEXT="4. python update_all_data.py --target indices"/>
 </node>
-<node CREATED="1700000000194" ID="ID_9_2" MODIFIED="1700000000194" TEXT="月次リバランス型最適化ワークフロー">
-<node CREATED="1700000000195" ID="ID_9_2_1" MODIFIED="1700000000195" TEXT="1. 時系列最適化: optimize_timeseries.py"/>
-<node CREATED="1700000000196" ID="ID_9_2_2" MODIFIED="1700000000196" TEXT="2. Holdout検証: holdout_eval_timeseries.py"/>
-<node CREATED="1700000000197" ID="ID_9_2_3" MODIFIED="1700000000197" TEXT="3. WFA評価: walk_forward_timeseries.py（オプション）"/>
-<node CREATED="1700000000198" ID="ID_9_2_4" MODIFIED="1700000000198" TEXT="4. コスト感度分析: evaluate_cost_sensitivity.py"/>
-<node CREATED="1700000000199" ID="ID_9_2_5" MODIFIED="1700000000199" TEXT="5. 結果保存: save_final_candidates_to_db.py"/>
-</node>
 <node CREATED="1700000000200" ID="ID_9_3" MODIFIED="1700000000200" TEXT="長期保有型運用ワークフロー">
-<node CREATED="1700000000201" ID="ID_9_3_1" MODIFIED="1700000000201" TEXT="1. 月次実行: monthly_run.py --asof YYYY-MM-DD"/>
+<node CREATED="1700000000201" ID="ID_9_3_1" MODIFIED="1700000000201" TEXT="1. 月次実行: longterm_run --asof YYYY-MM-DD"/>
 <node CREATED="1700000000202" ID="ID_9_3_2" MODIFIED="1700000000202" TEXT="2. スクリーニング結果を確認"/>
 <node CREATED="1700000000203" ID="ID_9_3_3" MODIFIED="1700000000203" TEXT="3. 保有銘柄管理: add_holding.py / sell_holding.py"/>
 <node CREATED="1700000000204" ID="ID_9_3_4" MODIFIED="1700000000204" TEXT="4. バックテスト: backtest.py --save-to-db"/>
-</node>
-<node CREATED="1700000000205" ID="ID_9_4" MODIFIED="1700000000205" TEXT="長期保有型最適化ワークフロー">
-<node CREATED="1700000000206" ID="ID_9_4_1" MODIFIED="1700000000206" TEXT="1. 最適化: optimize_longterm.py --start YYYY-MM-DD --end YYYY-MM-DD --study-type A/B/C"/>
-<node CREATED="1700000000207" ID="ID_9_4_2" MODIFIED="1700000000207" TEXT="2. 最適化結果を確認"/>
-<node CREATED="1700000000208" ID="ID_9_4_3" MODIFIED="1700000000208" TEXT="3. monthly_run.pyのパラメータを更新"/>
 </node>
 </node>
 </node>

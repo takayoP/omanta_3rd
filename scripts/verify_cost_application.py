@@ -176,55 +176,34 @@ def main():
             horizon_months=args.horizon_months,
             require_full_horizon=True,
             as_of_date=as_of_date,
+            return_per_portfolio_details=True,
         )
         
         mean_excess = perf["mean_annual_excess_return_pct"]
         median_excess = perf.get("median_annual_excess_return_pct", 0.0)
         win_rate = perf["win_rate"]
         num_portfolios = perf["num_portfolios"]
-        
-        # コスト情報を取得（デバッグ用）
-        cost_info_list = []
-        if cost_bps > 0:
-            # 長期保有型の場合、コスト = 購入コスト + 売却コスト
-            # 購入コスト = cost_bps / 100.0 (%)
-            # 売却コスト = (1.0 + avg_gross_return/100) * cost_bps / 100.0 (%)
-            # 平均グロスリターンを推定（年率超過リターン + TOPIXリターン）
-            annual_excess_returns = perf.get("annual_excess_returns_list", [])
-            if annual_excess_returns:
-                # TOPIXリターンを取得（平均的な値を想定）
-                # 実際のTOPIXリターンは各ポートフォリオで異なるが、平均値を推定
-                mean_annual_return = perf.get("mean_annual_return_pct", 0.0)
-                mean_excess_return = perf.get("mean_annual_excess_return_pct", 0.0)
-                # グロスリターン = 超過リターン + TOPIXリターン
-                # TOPIXリターン = 年率リターン - 超過リターン（近似）
-                estimated_topix_return = mean_annual_return - mean_excess_return if mean_annual_return else 0.0
-                avg_gross_return = mean_excess_return + estimated_topix_return
-            else:
-                avg_gross_return = 0.0
-            
-            # コスト計算（正確な計算式）
-            # 購入コスト率（パーセント）: cost_bps / 100.0
-            buy_cost_pct = cost_bps / 100.0
-            # 売却コスト率（パーセント）: (1.0 + avg_gross_return/100) * cost_bps / 100.0
-            sell_cost_pct = (1.0 + avg_gross_return / 100.0) * cost_bps / 100.0
-            total_cost_pct = buy_cost_pct + sell_cost_pct
-            cost_info_list.append({
-                "buy_cost_pct": buy_cost_pct,
-                "sell_cost_pct": sell_cost_pct,
-                "total_cost_pct": total_cost_pct,
-            })
+        per_portfolio = perf.get("per_portfolio_details", [])
         
         print(f"  年率超過リターン（平均）: {mean_excess:.4f}%")
         print(f"  年率超過リターン（中央値）: {median_excess:.4f}%")
         print(f"  勝率: {win_rate:.4f}")
         print(f"  ポートフォリオ数: {num_portfolios}")
-        if cost_info_list:
-            cost_info = cost_info_list[0]
-            print(f"  コスト情報（推定）:")
-            print(f"    購入コスト: {cost_info['buy_cost_pct']:.4f}%")
-            print(f"    売却コスト: {cost_info['sell_cost_pct']:.4f}%")
-            print(f"    合計コスト: {cost_info['total_cost_pct']:.4f}%")
+        
+        # 1ポートフォリオ単位のgross/net/cost
+        if per_portfolio:
+            print("  【1ポートフォリオ単位: gross vs net】")
+            print(f"  {'リバランス日':<12} {'累積gross%':>10} {'累積net%':>10} {'cost%':>8} {'年率gross%':>10} {'年率net%':>10}")
+            for p in per_portfolio[:5]:  # 最初の5件
+                print(f"  {p['rebalance_date']:<12} {p['gross_return_pct']:>10.2f} {p['net_return_pct']:>10.2f} "
+                      f"{p['total_cost_pct']:>8.2f} {p.get('annualized_gross_pct') or 0:>10.2f} "
+                      f"{p.get('annualized_net_pct') or 0:>10.2f}")
+            if len(per_portfolio) > 5:
+                print(f"  ... 他 {len(per_portfolio) - 5} 件")
+            # サマリ
+            gross_net_diffs = [p["gross_return_pct"] - p["net_return_pct"] for p in per_portfolio]
+            avg_diff = np.mean(gross_net_diffs) if gross_net_diffs else 0.0
+            print(f"  平均(gross-net)差分: {avg_diff:.4f}%")
         print()
         
         results.append({
@@ -233,7 +212,7 @@ def main():
             "median_annual_excess_return_pct": median_excess,
             "win_rate": win_rate,
             "num_portfolios": num_portfolios,
-            "cost_info": cost_info_list[0] if cost_info_list else None,
+            "per_portfolio_details": per_portfolio,
         })
     
     # コスト影響の分析
@@ -242,42 +221,47 @@ def main():
     print("=" * 80)
     print()
     
-    if len(results) >= 2:
-        result_0bps = results[0]  # 最初が0bpsと仮定
-        result_25bps = None
-        for r in results:
-            if r["cost_bps"] == 25.0:
-                result_25bps = r
-                break
-        
-        if result_25bps:
-            mean_diff = result_0bps["mean_annual_excess_return_pct"] - result_25bps["mean_annual_excess_return_pct"]
-            median_diff = result_0bps["median_annual_excess_return_pct"] - result_25bps["median_annual_excess_return_pct"]
-            
-            print(f"0bps vs 25bps:")
-            print(f"  平均超過リターンの差分: {mean_diff:.4f}%ポイント")
-            print(f"  中央値超過リターンの差分: {median_diff:.4f}%ポイント")
-            print()
-            
-            if abs(mean_diff) < 0.01 and abs(median_diff) < 0.01:
-                print("⚠️  警告: コストが効いていない可能性があります")
-                print("   0bpsと25bpsの結果がほぼ同じです。")
-                print("   以下を確認してください:")
-                print("   - turnover（売買代金/ポートフォリオ）が0に近くないか")
-                print("   - cost_deduction（コスト控除額）が計算されているか")
-                print("   - gross_returnとnet_returnの差分が存在するか")
-            else:
-                print("✅ コストは正常に適用されています")
-                print(f"   コスト影響: {mean_diff:.4f}%ポイント")
+    print(f"{'cost_bps':<10} {'平均超過%':<12} {'中央値超過%':<12} {'勝率':<10}")
+    print("-" * 50)
+    for r in results:
+        print(f"{r['cost_bps']:<10.0f} {r['mean_annual_excess_return_pct']:<12.4f} "
+              f"{r['median_annual_excess_return_pct']:<12.4f} {r['win_rate']:<10.4f}")
     
-    print()
-    print("=" * 80)
-    print("【注意】")
-    print("=" * 80)
-    print()
-    print("このスクリプトは結果の差分のみを確認します。")
-    print("詳細なturnoverやcost_deductionの確認には、")
-    print("calculate_longterm_performance関数内のログ出力を確認してください。")
+    # 0bps vs 25bps vs 50bps の差分
+    result_0 = next((r for r in results if r["cost_bps"] == 0), None)
+    result_25 = next((r for r in results if r["cost_bps"] == 25), None)
+    result_50 = next((r for r in results if r["cost_bps"] == 50), None)
+    
+    if result_0 and result_25:
+        mean_diff_25 = result_0["mean_annual_excess_return_pct"] - result_25["mean_annual_excess_return_pct"]
+        median_diff_25 = result_0["median_annual_excess_return_pct"] - result_25["median_annual_excess_return_pct"]
+        print()
+        print("0bps vs 25bps:")
+        print(f"  平均超過の差分: {mean_diff_25:.4f}%ポイント")
+        print(f"  中央値超過の差分: {median_diff_25:.4f}%ポイント")
+        
+        # 1ポートフォリオ単位のgross-net確認
+        pp_25 = result_25.get("per_portfolio_details", [])
+        if pp_25:
+            avg_cost_pct = np.mean([p["total_cost_pct"] for p in pp_25])
+            gross_net_diffs = [p["gross_return_pct"] - p["net_return_pct"] for p in pp_25]
+            avg_gross_net_diff = np.mean(gross_net_diffs)
+            print(f"  25bps時の平均cost控除（累積）: {avg_cost_pct:.4f}%")
+            print(f"  25bps時の平均(gross-net): {avg_gross_net_diff:.4f}%")
+        
+        print()
+        if abs(mean_diff_25) < 0.01 and abs(median_diff_25) < 0.01:
+            print("❌ 判定: コストが効いていない可能性が高い")
+            print("   0bpsと25bpsの結果がほぼ同じです。")
+            print("   確認: turnover、cost適用箇所、gross/net計算")
+        else:
+            print("✅ 判定: コストは正常に適用されている")
+    
+    if result_0 and result_50:
+        mean_diff_50 = result_0["mean_annual_excess_return_pct"] - result_50["mean_annual_excess_return_pct"]
+        print()
+        print("0bps vs 50bps: 平均超過の差分: {:.4f}%ポイント".format(mean_diff_50))
+    
     print()
     
     return 0

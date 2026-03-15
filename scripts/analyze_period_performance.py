@@ -203,6 +203,7 @@ def main():
         win_rate = perf["win_rate"]
         num_portfolios = perf["num_portfolios"]
         annual_excess_returns = perf.get("annual_excess_returns_list", [])
+        excess_by_rebalance = perf.get("annual_excess_by_rebalance", [])
         
         period_results[period] = {
             "mean_excess": mean_excess,
@@ -210,6 +211,7 @@ def main():
             "win_rate": win_rate,
             "num_portfolios": num_portfolios,
             "annual_excess_returns": annual_excess_returns,
+            "excess_by_rebalance": excess_by_rebalance,
         }
         
         print(f"  年率超過リターン（平均）: {mean_excess:.4f}%")
@@ -221,6 +223,13 @@ def main():
             print(f"  個別リターン: {[f'{r:.2f}%' for r in annual_excess_returns]}")
             print(f"  最小リターン: {min(annual_excess_returns):.4f}%")
             print(f"  最大リターン: {max(annual_excess_returns):.4f}%")
+        
+        # リバランス日別の月次超過リターン一覧（寄与分解用）
+        if excess_by_rebalance:
+            print("  【月次（リバランス日別）超過リターン一覧】")
+            print(f"  {'リバランス日':<12} {'年率超過(%)':<12}")
+            for rd, ret in excess_by_rebalance:
+                print(f"  {rd:<12} {ret:>10.2f}%")
         
         print()
     

@@ -1,6 +1,6 @@
 <map version="1.0.1">
 <!-- To view this file, download free mind mapping software FreeMind from http://freemind.sourceforge.net -->
-<node CREATED="1700000000000" ID="ID_ROOT" MODIFIED="1700000000000" TEXT="投資アルゴリズムシステム 技術スタック">
+<node CREATED="1700000000000" ID="ID_ROOT" MODIFIED="1700000000000" TEXT="使用技術">
 <node CREATED="1700000000001" ID="ID_1" MODIFIED="1700000000001" POSITION="right" TEXT="1. プログラミング言語・実行環境">
 <node CREATED="1700000000002" ID="ID_1_1" MODIFIED="1700000000002" TEXT="Python">
 <node CREATED="1700000000003" ID="ID_1_1_1" MODIFIED="1700000000003" TEXT="バージョン: 3.9以上（3.9, 3.10, 3.11対応）"/>
@@ -29,13 +29,11 @@
 <node CREATED="1700000000023" ID="ID_2_1_3_4" MODIFIED="1700000000023" TEXT="タイムアウト: 30秒"/>
 </node>
 <node CREATED="1700000000024" ID="ID_2_1_4" MODIFIED="1700000000024" TEXT="主なテーブル">
-<node CREATED="1700000000025" ID="ID_2_1_4_1" MODIFIED="1700000000025" TEXT="listed_info: 銘柄属性"/>
-<node CREATED="1700000000026" ID="ID_2_1_4_2" MODIFIED="1700000000026" TEXT="prices_daily: 日次価格データ"/>
-<node CREATED="1700000000027" ID="ID_2_1_4_3" MODIFIED="1700000000027" TEXT="fins_statements: 財務データ"/>
-<node CREATED="1700000000028" ID="ID_2_1_4_4" MODIFIED="1700000000028" TEXT="features_monthly: 月次特徴量スナップショット"/>
-<node CREATED="1700000000029" ID="ID_2_1_4_5" MODIFIED="1700000000029" TEXT="portfolio_monthly: 長期保有型ポートフォリオ"/>
-<node CREATED="1700000000030" ID="ID_2_1_4_6" MODIFIED="1700000000030" TEXT="monthly_rebalance_portfolio: 月次リバランス型ポートフォリオ"/>
-<node CREATED="1700000000031" ID="ID_2_1_4_7" MODIFIED="1700000000031" TEXT="backtest_performance: バックテスト結果"/>
+<node CREATED="1700000000025" ID="ID_2_1_4_1" MODIFIED="1700000000025" TEXT="listed_info, prices_daily, fins_statements, index_daily: 銘柄・価格・財務・指数"/>
+<node CREATED="1700000000028" ID="ID_2_1_4_4" MODIFIED="1700000000028" TEXT="features_monthly: 月次特徴量（core_score_ref, entry_score_ref 含む）"/>
+<node CREATED="1700000000029" ID="ID_2_1_4_5" MODIFIED="1700000000029" TEXT="strategy_runs, portfolio_snapshots: 選定・実行結果"/>
+<node CREATED="1700000000030" ID="ID_2_1_4_6" MODIFIED="1700000000030" TEXT="portfolio_monthly, holdings: 長期保有型"/>
+<node CREATED="1700000000031" ID="ID_2_1_4_7" MODIFIED="1700000000031" TEXT="backtest_performance, performance_series, performance_summary"/>
 </node>
 </node>
 </node>
@@ -168,13 +166,14 @@
 </node>
 <node CREATED="1700000000127" ID="ID_10" MODIFIED="1700000000127" POSITION="left" TEXT="10. アーキテクチャパターン">
 <node CREATED="1700000000128" ID="ID_10_1" MODIFIED="1700000000128" TEXT="レイヤー構造">
-<node CREATED="1700000000129" ID="ID_10_1_1" MODIFIED="1700000000129" TEXT="infra: インフラ層（DB、API）"/>
+<node CREATED="1700000000129" ID="ID_10_1_1" MODIFIED="1700000000129" TEXT="infra: DB（sqlite3）、API（jquants）、repositories（features_repo, run_repo）"/>
 <node CREATED="1700000000130" ID="ID_10_1_2" MODIFIED="1700000000130" TEXT="ingest: データ取り込み層"/>
 <node CREATED="1700000000131" ID="ID_10_1_3" MODIFIED="1700000000131" TEXT="features: 特徴量計算層"/>
-<node CREATED="1700000000132" ID="ID_10_1_4" MODIFIED="1700000000132" TEXT="strategy: 戦略層（スコアリング、選定）"/>
-<node CREATED="1700000000133" ID="ID_10_1_5" MODIFIED="1700000000133" TEXT="backtest: バックテスト層"/>
-<node CREATED="1700000000134" ID="ID_10_1_6" MODIFIED="1700000000134" TEXT="jobs: ジョブ層（実行スクリプト）"/>
-<node CREATED="1700000000135" ID="ID_10_1_7" MODIFIED="1700000000135" TEXT="reporting: レポート層"/>
+<node CREATED="1700000000132" ID="ID_10_1_4" MODIFIED="1700000000132" TEXT="strategy: 戦略層（snapshot, scoring_engine, policy）"/>
+<node CREATED="1700000000133" ID="ID_10_1_5" MODIFIED="1700000000133" TEXT="backtest: バックテスト層（timeseries, metrics, evaluator）"/>
+<node CREATED="1700000000134" ID="ID_10_1_6" MODIFIED="1700000000134" TEXT="config: 設定（score_profile, policy_params）"/>
+<node CREATED="1700000000135" ID="ID_10_1_7" MODIFIED="1700000000135" TEXT="jobs: ジョブ層（prepare_features, run_strategy, optimize_strategy 等）"/>
+<node CREATED="1700000000240" ID="ID_10_1_8" MODIFIED="1700000000240" TEXT="reporting: レポート層"/>
 </node>
 <node CREATED="1700000000136" ID="ID_10_2" MODIFIED="1700000000136" TEXT="設計パターン">
 <node CREATED="1700000000137" ID="ID_10_2_1" MODIFIED="1700000000137" TEXT="Context Manager: データベース接続管理"/>

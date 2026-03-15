@@ -523,11 +523,14 @@ def calculate_portfolio_performance(
             ),
         }
         
-        # コスト情報を追加（デバッグ用）
-        if cost_bps > 0 and not pd.isna(total_return_gross):
-            buy_cost_pct = cost_bps / 100.0
-            sell_cost_pct = (1.0 + total_return_gross / 100.0) * cost_bps / 100.0
-            total_cost_pct = buy_cost_pct + sell_cost_pct
+        # コスト情報を追加（デバッグ・検証用、cost_bps=0でもgross=netで返す）
+        if not pd.isna(total_return_gross):
+            if cost_bps > 0:
+                buy_cost_pct = cost_bps / 100.0
+                sell_cost_pct = (1.0 + total_return_gross / 100.0) * cost_bps / 100.0
+                total_cost_pct = buy_cost_pct + sell_cost_pct
+            else:
+                buy_cost_pct = sell_cost_pct = total_cost_pct = 0.0
             portfolio_topix_comparison["cost_info"] = {
                 "cost_bps": cost_bps,
                 "buy_cost_pct": buy_cost_pct,

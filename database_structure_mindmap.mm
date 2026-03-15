@@ -56,6 +56,7 @@
 <node CREATED="1700000000046" ID="ID_2_4_2_8" MODIFIED="1700000000046" TEXT="成長率: op_growth, profit_growth"/>
 <node CREATED="1700000000047" ID="ID_2_4_2_9" MODIFIED="1700000000047" TEXT="最高益: record_high_flag, record_high_forecast_flag"/>
 <node CREATED="1700000000048" ID="ID_2_4_2_10" MODIFIED="1700000000048" TEXT="スコア: core_score, entry_score"/>
+<node CREATED="1700000000490" ID="ID_2_4_2_11" MODIFIED="1700000000490" TEXT="ref score用: score_profile, core_score_ref, entry_score_ref"/>
 </node>
 </node>
 <node CREATED="1700000000049" ID="ID_2_5" MODIFIED="1700000000049" TEXT="index_daily（指数データ・TOPIX）">
@@ -78,13 +79,17 @@
 <node CREATED="1700000000064" ID="ID_2_6_2_4" MODIFIED="1700000000064" TEXT="period_end: 当期末日（YYYY-MM-DD）"/>
 </node>
 </node>
+<node CREATED="1700000000650" ID="ID_2_7" MODIFIED="1700000000650" TEXT="stock_splits（株式分割情報）">
+<node CREATED="1700000000651" ID="ID_2_7_1" MODIFIED="1700000000651" TEXT="主キー: (code, split_date)"/>
+<node CREATED="1700000000652" ID="ID_2_7_2" MODIFIED="1700000000652" TEXT="主要カラム: code, split_date, split_ratio, description"/>
+</node>
 </node>
 <node CREATED="1700000000065" ID="ID_3" MODIFIED="1700000000065" POSITION="right" TEXT="2. 長期保有型テーブル">
 <node CREATED="1700000000066" ID="ID_3_1" MODIFIED="1700000000066" TEXT="portfolio_monthly（月次ポートフォリオ）">
 <node CREATED="1700000000067" ID="ID_3_1_1" MODIFIED="1700000000067" TEXT="主キー: (rebalance_date, code)"/>
 <node CREATED="1700000000068" ID="ID_3_1_2" MODIFIED="1700000000068" TEXT="用途">
 <node CREATED="1700000000069" ID="ID_3_1_2_1" MODIFIED="1700000000069" TEXT="最適化時の一時保存（最適化後は削除）"/>
-<node CREATED="1700000000070" ID="ID_3_1_2_2" MODIFIED="1700000000070" TEXT="monthly_run.py実行時の参考情報として保存"/>
+<node CREATED="1700000000070" ID="ID_3_1_2_2" MODIFIED="1700000000070" TEXT="longterm_run 実行時の参考情報として保存"/>
 </node>
 <node CREATED="1700000000071" ID="ID_3_1_3" MODIFIED="1700000000071" TEXT="主要カラム">
 <node CREATED="1700000000072" ID="ID_3_1_3_1" MODIFIED="1700000000072" TEXT="rebalance_date: リバランス日（YYYY-MM-DD）"/>
@@ -165,107 +170,46 @@
 </node>
 </node>
 </node>
-<node CREATED="1700000000139" ID="ID_4" MODIFIED="1700000000139" POSITION="left" TEXT="3. 月次リバランス型テーブル（monthly_rebalance_接頭辞）">
-<node CREATED="1700000000140" ID="ID_4_1" MODIFIED="1700000000140" TEXT="monthly_rebalance_portfolio（月次リバランス型専用ポートフォリオ）">
-<node CREATED="1700000000141" ID="ID_4_1_1" MODIFIED="1700000000141" TEXT="主キー: (rebalance_date, code)"/>
-<node CREATED="1700000000142" ID="ID_4_1_2" MODIFIED="1700000000142" TEXT="用途: 月次リバランス型の確定結果として保存"/>
-<node CREATED="1700000000143" ID="ID_4_1_3" MODIFIED="1700000000143" TEXT="主要カラム">
-<node CREATED="1700000000144" ID="ID_4_1_3_1" MODIFIED="1700000000144" TEXT="rebalance_date: リバランス日（YYYY-MM-DD）"/>
-<node CREATED="1700000000145" ID="ID_4_1_3_2" MODIFIED="1700000000145" TEXT="code: 銘柄コード"/>
-<node CREATED="1700000000146" ID="ID_4_1_3_3" MODIFIED="1700000000146" TEXT="weight: ウェイト"/>
-<node CREATED="1700000000147" ID="ID_4_1_3_4" MODIFIED="1700000000147" TEXT="core_score: ファンダメンタルスコア"/>
-<node CREATED="1700000000148" ID="ID_4_1_3_5" MODIFIED="1700000000148" TEXT="entry_score: エントリースコア"/>
-<node CREATED="1700000000149" ID="ID_4_1_3_6" MODIFIED="1700000000149" TEXT="reason: 採用理由（JSON文字列）"/>
+<node CREATED="1700000002195" ID="ID_4b" MODIFIED="1700000002195" POSITION="left" TEXT="4. 選定・実行テーブル（strategy_runs 系）">
+<node CREATED="1700000002200" ID="ID_4b_1" MODIFIED="1700000002200" TEXT="strategy_runs（実行メタデータ）">
+<node CREATED="1700000002201" ID="ID_4b_1_1" MODIFIED="1700000002201" TEXT="主キー: run_id"/>
+<node CREATED="1700000002202" ID="ID_4b_1_2" MODIFIED="1700000002202" TEXT="主要カラム: mode, run_type, score_profile, params_json, asof, start_date, end_date, objective_name, objective_value, parent_run_id, created_at"/>
+</node>
+<node CREATED="1700000002203" ID="ID_4b_2" MODIFIED="1700000002203" TEXT="portfolio_snapshots（リバランス日別選定結果）">
+<node CREATED="1700000002204" ID="ID_4b_2_1" MODIFIED="1700000002204" TEXT="主キー: (run_id, rebalance_date, code) / FK: run_id → strategy_runs"/>
+<node CREATED="1700000002205" ID="ID_4b_2_2" MODIFIED="1700000002205" TEXT="主要カラム: rank, weight, total_score, core_score_ref, entry_score_ref, bucket, action, detail_json"/>
+</node>
+<node CREATED="1700000002206" ID="ID_4b_3" MODIFIED="1700000002206" TEXT="performance_series（日付別時系列）">
+<node CREATED="1700000002207" ID="ID_4b_3_1" MODIFIED="1700000002207" TEXT="主キー: (run_id, date) / FK: run_id → strategy_runs"/>
+<node CREATED="1700000002208" ID="ID_4b_3_2" MODIFIED="1700000002208" TEXT="主要カラム: nav, return, benchmark_return, excess_return, drawdown, turnover"/>
+</node>
+<node CREATED="1700000002209" ID="ID_4b_4" MODIFIED="1700000002209" TEXT="performance_summary（run 単位集計）">
+<node CREATED="1700000002210" ID="ID_4b_4_1" MODIFIED="1700000002210" TEXT="主キー: run_id / FK: run_id → strategy_runs"/>
+<node CREATED="1700000002211" ID="ID_4b_4_2" MODIFIED="1700000002211" TEXT="主要カラム: cagr, sharpe, maxdd, calmar, avg_turnover, hit_ratio, detail_json"/>
+</node>
+<node CREATED="1700000002212" ID="ID_4b_5" MODIFIED="1700000002212" TEXT="live_holdings（実保有・optional）">
+<node CREATED="1700000002213" ID="ID_4b_5_1" MODIFIED="1700000002213" TEXT="主キー: (asof_date, code)"/>
+<node CREATED="1700000002214" ID="ID_4b_5_2" MODIFIED="1700000002214" TEXT="主要カラム: shares, avg_cost, market_value, status"/>
 </node>
 </node>
-<node CREATED="1700000000150" ID="ID_4_2" MODIFIED="1700000000150" TEXT="monthly_rebalance_final_selected_candidates（最終選定候補・基本情報とパラメータ）">
-<node CREATED="1700000000151" ID="ID_4_2_1" MODIFIED="1700000000151" TEXT="主キー: trial_number"/>
-<node CREATED="1700000000152" ID="ID_4_2_2" MODIFIED="1700000000152" TEXT="用途: 月次リバランス型の最適化結果"/>
-<node CREATED="1700000000153" ID="ID_4_2_3" MODIFIED="1700000000153" TEXT="主要カラム">
-<node CREATED="1700000000154" ID="ID_4_2_3_1" MODIFIED="1700000000154" TEXT="trial_number: トライアル番号"/>
-<node CREATED="1700000000155" ID="ID_4_2_3_2" MODIFIED="1700000000155" TEXT="cluster: クラスタ番号"/>
-<node CREATED="1700000000156" ID="ID_4_2_3_3" MODIFIED="1700000000156" TEXT="train_sharpe: Train期間のSharpe比"/>
-<node CREATED="1700000000157" ID="ID_4_2_3_4" MODIFIED="1700000000157" TEXT="ranking: ランキング"/>
-<node CREATED="1700000000158" ID="ID_4_2_3_5" MODIFIED="1700000000158" TEXT="recommendation_text: 推奨テキスト"/>
-<node CREATED="1700000000159" ID="ID_4_2_3_6" MODIFIED="1700000000159" TEXT="パラメータ: w_quality, w_growth, w_record_high, w_size, w_value, w_forward_per, roe_min, bb_weight, liquidity_quantile_cut, rsi_base, rsi_max, bb_z_base, bb_z_max"/>
-</node>
-</node>
-<node CREATED="1700000000160" ID="ID_4_3" MODIFIED="1700000000160" TEXT="monthly_rebalance_candidate_performance（最終選定候補のパフォーマンス指標）">
-<node CREATED="1700000000161" ID="ID_4_3_1" MODIFIED="1700000000161" TEXT="主キー: id (AUTOINCREMENT)"/>
-<node CREATED="1700000000162" ID="ID_4_3_2" MODIFIED="1700000000162" TEXT="外部キー: trial_number → monthly_rebalance_final_selected_candidates"/>
-<node CREATED="1700000000163" ID="ID_4_3_3" MODIFIED="1700000000163" TEXT="用途: 月次リバランス型のパフォーマンス集計"/>
-<node CREATED="1700000000164" ID="ID_4_3_4" MODIFIED="1700000000164" TEXT="主要カラム">
-<node CREATED="1700000000165" ID="ID_4_3_4_1" MODIFIED="1700000000165" TEXT="trial_number: トライアル番号"/>
-<node CREATED="1700000000166" ID="ID_4_3_4_2" MODIFIED="1700000000166" TEXT="evaluation_type: 評価タイプ（2023-2024 Holdout期間等）"/>
-<node CREATED="1700000000167" ID="ID_4_3_4_3" MODIFIED="1700000000167" TEXT="sharpe_excess_0bps/10bps/20bps/30bps: コスト別Sharpe超過"/>
-<node CREATED="1700000000168" ID="ID_4_3_4_4" MODIFIED="1700000000168" TEXT="sharpe_excess_2023/2024: 年別Sharpe超過"/>
-<node CREATED="1700000000169" ID="ID_4_3_4_5" MODIFIED="1700000000169" TEXT="cagr_excess_2023/2024: 年別CAGR超過"/>
-<node CREATED="1700000000170" ID="ID_4_3_4_6" MODIFIED="1700000000170" TEXT="max_drawdown: 最大ドローダウン"/>
-<node CREATED="1700000000171" ID="ID_4_3_4_7" MODIFIED="1700000000171" TEXT="turnover_annual: 年間ターンオーバー"/>
-<node CREATED="1700000000172" ID="ID_4_3_4_8" MODIFIED="1700000000172" TEXT="2025疑似ライブ指標: sharpe_excess_2025_10bps, cagr_excess_2025_10bps, max_drawdown_2025"/>
-</node>
-</node>
-<node CREATED="1700000000173" ID="ID_4_4" MODIFIED="1700000000173" TEXT="monthly_rebalance_candidate_monthly_returns（月次超過リターン時系列）">
-<node CREATED="1700000000174" ID="ID_4_4_1" MODIFIED="1700000000174" TEXT="主キー: id (AUTOINCREMENT)"/>
-<node CREATED="1700000000175" ID="ID_4_4_2" MODIFIED="1700000000175" TEXT="外部キー: trial_number → monthly_rebalance_final_selected_candidates"/>
-<node CREATED="1700000000176" ID="ID_4_4_3" MODIFIED="1700000000176" TEXT="ユニーク制約: (trial_number, evaluation_period, period_date)"/>
-<node CREATED="1700000000177" ID="ID_4_4_4" MODIFIED="1700000000177" TEXT="用途: 月次リバランス型の時系列データ"/>
-<node CREATED="1700000000178" ID="ID_4_4_5" MODIFIED="1700000000178" TEXT="主要カラム">
-<node CREATED="1700000000179" ID="ID_4_4_5_1" MODIFIED="1700000000179" TEXT="trial_number: トライアル番号"/>
-<node CREATED="1700000000180" ID="ID_4_4_5_2" MODIFIED="1700000000180" TEXT="evaluation_period: 評価期間（holdout_2023_2024/holdout_2025等）"/>
-<node CREATED="1700000000181" ID="ID_4_4_5_3" MODIFIED="1700000000181" TEXT="period_date: 期間日（YYYY-MM-DD、月末日）"/>
-<node CREATED="1700000000182" ID="ID_4_4_5_4" MODIFIED="1700000000182" TEXT="excess_return: 月次超過リターン（小数、例: 0.05 = 5%）"/>
-</node>
-</node>
-<node CREATED="1700000000183" ID="ID_4_5" MODIFIED="1700000000183" TEXT="monthly_rebalance_candidate_detailed_metrics（詳細パフォーマンス指標）">
-<node CREATED="1700000000184" ID="ID_4_5_1" MODIFIED="1700000000184" TEXT="主キー: id (AUTOINCREMENT)"/>
-<node CREATED="1700000000185" ID="ID_4_5_2" MODIFIED="1700000000185" TEXT="外部キー: trial_number → monthly_rebalance_final_selected_candidates"/>
-<node CREATED="1700000000186" ID="ID_4_5_3" MODIFIED="1700000000186" TEXT="ユニーク制約: (trial_number, evaluation_period, cost_bps)"/>
-<node CREATED="1700000000187" ID="ID_4_5_4" MODIFIED="1700000000187" TEXT="用途: 月次リバランス型の詳細メトリクス"/>
-<node CREATED="1700000000188" ID="ID_4_5_5" MODIFIED="1700000000188" TEXT="主要カラム">
-<node CREATED="1700000000189" ID="ID_4_5_5_1" MODIFIED="1700000000189" TEXT="trial_number: トライアル番号"/>
-<node CREATED="1700000000190" ID="ID_4_5_5_2" MODIFIED="1700000000190" TEXT="evaluation_period: 評価期間（holdout_2023_2024/holdout_2025等）"/>
-<node CREATED="1700000000191" ID="ID_4_5_5_3" MODIFIED="1700000000191" TEXT="cost_bps: 取引コスト（bps、0.0/10.0/20.0等）"/>
-<node CREATED="1700000000192" ID="ID_4_5_5_4" MODIFIED="1700000000192" TEXT="基本指標: cagr, mean_return, mean_excess_return, total_return, volatility, sharpe_ratio, sortino_ratio, win_rate, profit_factor"/>
-<node CREATED="1700000000193" ID="ID_4_5_5_5" MODIFIED="1700000000193" TEXT="詳細指標: num_periods, num_missing_stocks, mean_excess_return_monthly/annual, vol_excess_monthly/annual, max_drawdown_topix, turnover_monthly/annual"/>
-<node CREATED="1700000000194" ID="ID_4_5_5_6" MODIFIED="1700000000194" TEXT="コスト関連: sharpe_excess_after_cost, mean_excess_return_after_cost_monthly/annual, vol_excess_after_cost_monthly/annual, annual_cost_bps/pct"/>
-</node>
-</node>
-</node>
-<node CREATED="1700000000195" ID="ID_5" MODIFIED="1700000000195" POSITION="left" TEXT="4. テーブル関係性">
-<node CREATED="1700000000196" ID="ID_5_1" MODIFIED="1700000000196" TEXT="月次リバランス型の外部キー関係">
-<node CREATED="1700000000197" ID="ID_5_1_1" MODIFIED="1700000000197" TEXT="monthly_rebalance_final_selected_candidates (trial_number)"/>
-<node CREATED="1700000000198" ID="ID_5_1_2" MODIFIED="1700000000198" TEXT="↓"/>
-<node CREATED="1700000000199" ID="ID_5_1_3" MODIFIED="1700000000199" TEXT="monthly_rebalance_candidate_performance (trial_number)"/>
-<node CREATED="1700000000200" ID="ID_5_1_4" MODIFIED="1700000000200" TEXT="monthly_rebalance_candidate_monthly_returns (trial_number)"/>
-<node CREATED="1700000000201" ID="ID_5_1_5" MODIFIED="1700000000201" TEXT="monthly_rebalance_candidate_detailed_metrics (trial_number)"/>
-</node>
-<node CREATED="1700000000202" ID="ID_5_2" MODIFIED="1700000000202" TEXT="共通テーブルとの関係">
-<node CREATED="1700000000203" ID="ID_5_2_1" MODIFIED="1700000000203" TEXT="features_monthly: 全テーブルの特徴量ソース"/>
+<node CREATED="1700000000195" ID="ID_5" MODIFIED="1700000000195" POSITION="left" TEXT="5. テーブル関係性">
+<node CREATED="1700000000202" ID="ID_5_2" MODIFIED="1700000000202" TEXT="共通テーブル">
+<node CREATED="1700000000203" ID="ID_5_2_1" MODIFIED="1700000000203" TEXT="features_monthly: 特徴量ソース"/>
 <node CREATED="1700000000204" ID="ID_5_2_2" MODIFIED="1700000000204" TEXT="prices_daily: 価格データソース"/>
 <node CREATED="1700000000205" ID="ID_5_2_3" MODIFIED="1700000000205" TEXT="fins_statements: 財務データソース"/>
 <node CREATED="1700000000206" ID="ID_5_2_4" MODIFIED="1700000000206" TEXT="index_daily: TOPIX比較用"/>
 </node>
-</node>
-<node CREATED="1700000000207" ID="ID_6" MODIFIED="1700000000207" POSITION="left" TEXT="5. インデックス">
-<node CREATED="1700000000208" ID="ID_6_1" MODIFIED="1700000000208" TEXT="idx_monthly_rebalance_performance_trial">
-<node CREATED="1700000000209" ID="ID_6_1_1" MODIFIED="1700000000209" TEXT="テーブル: monthly_rebalance_candidate_performance"/>
-<node CREATED="1700000000210" ID="ID_6_1_2" MODIFIED="1700000000210" TEXT="カラム: trial_number"/>
-</node>
-<node CREATED="1700000000211" ID="ID_6_2" MODIFIED="1700000000211" TEXT="idx_monthly_rebalance_returns_trial_period">
-<node CREATED="1700000000212" ID="ID_6_2_1" MODIFIED="1700000000212" TEXT="テーブル: monthly_rebalance_candidate_monthly_returns"/>
-<node CREATED="1700000000213" ID="ID_6_2_2" MODIFIED="1700000000213" TEXT="カラム: (trial_number, evaluation_period)"/>
-</node>
-<node CREATED="1700000000214" ID="ID_6_3" MODIFIED="1700000000214" TEXT="idx_monthly_rebalance_detailed_metrics_trial_period">
-<node CREATED="1700000000215" ID="ID_6_3_1" MODIFIED="1700000000215" TEXT="テーブル: monthly_rebalance_candidate_detailed_metrics"/>
-<node CREATED="1700000000216" ID="ID_6_3_2" MODIFIED="1700000000216" TEXT="カラム: (trial_number, evaluation_period)"/>
+<node CREATED="1700000002220" ID="ID_5_3" MODIFIED="1700000002220" TEXT="strategy_runs を親に">
+<node CREATED="1700000002221" ID="ID_5_3_1" MODIFIED="1700000002221" TEXT="portfolio_snapshots (run_id), performance_series (run_id), performance_summary (run_id)"/>
 </node>
 </node>
-<node CREATED="1700000000217" ID="ID_7" MODIFIED="1700000000217" POSITION="left" TEXT="6. 命名規則">
-<node CREATED="1700000000218" ID="ID_7_1" MODIFIED="1700000000218" TEXT="月次リバランス型テーブル">
-<node CREATED="1700000000219" ID="ID_7_1_1" MODIFIED="1700000000219" TEXT="接頭辞: monthly_rebalance_"/>
-<node CREATED="1700000000220" ID="ID_7_1_2" MODIFIED="1700000000220" TEXT="目的: 長期保有型と明確に区別"/>
+<node CREATED="1700000000207" ID="ID_6" MODIFIED="1700000000207" POSITION="left" TEXT="6. インデックス">
+<node CREATED="1700000002215" ID="ID_6_4" MODIFIED="1700000002215" TEXT="選定・実行テーブル用">
+<node CREATED="1700000002216" ID="ID_6_4_1" MODIFIED="1700000002216" TEXT="ix_portfolio_snapshots_run_rebalance: (run_id, rebalance_date)"/>
+<node CREATED="1700000002217" ID="ID_6_4_2" MODIFIED="1700000002217" TEXT="ix_performance_series_run_date: (run_id, date)"/>
 </node>
+</node>
+<node CREATED="1700000000217" ID="ID_7" MODIFIED="1700000000217" POSITION="left" TEXT="7. 命名規則">
 <node CREATED="1700000000221" ID="ID_7_2" MODIFIED="1700000000221" TEXT="長期保有型テーブル">
 <node CREATED="1700000000222" ID="ID_7_2_1" MODIFIED="1700000000222" TEXT="接頭辞なし（標準的な命名）"/>
 <node CREATED="1700000000223" ID="ID_7_2_2" MODIFIED="1700000000223" TEXT="例: portfolio_monthly, holdings, backtest_performance"/>

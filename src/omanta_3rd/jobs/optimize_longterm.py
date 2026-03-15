@@ -255,6 +255,8 @@ def calculate_longterm_performance(
     require_full_horizon: bool = True,
     as_of_date: Optional[str] = None,
     debug_rebalance_dates: Optional[set] = None,
+    return_per_portfolio_details: bool = False,
+    return_raw_performances: bool = False,
 ) -> Dict[str, Any]:
     """
     長期保有型のパフォーマンスを計算（固定ホライズン評価）
@@ -273,6 +275,8 @@ def calculate_longterm_performance(
                     **重要**: 未来参照リークを防ぐため、必ず明示的に指定してください（例: end_dateを渡す）
                     Noneの場合はエラーを発生させます（DB MAX(date)は使用しません）
         debug_rebalance_dates: デバッグ出力するリバランス日のセット（Noneの場合は出力なし）
+        return_per_portfolio_details: Trueの場合、per_portfolio_details（gross/net/cost情報）を返す（コスト検証用）
+        return_raw_performances: Trueの場合、raw_performances（銘柄別寄与分解用）を返す
     
     Returns:
         パフォーマンス指標の辞書
@@ -799,6 +803,7 @@ def calculate_longterm_performance(
     
     annual_returns = []  # 各ポートフォリオの年率リターン
     annual_excess_returns = []  # 各ポートフォリオの年率超過リターン（目的関数用）
+    annual_excess_by_rebalance = []  # [(rebalance_date, annual_excess_pct), ...] 寄与分解用
     total_returns = []  # 累積リターン（参考用）
     excess_returns = []  # 累積超過リターン（参考用）
     holding_periods = []  # 保有期間（年）
@@ -860,6 +865,7 @@ def calculate_longterm_performance(
                             # 年率超過リターン = 年率総リターン - 年率TOPIXリターン
                             annual_excess_return_pct = annual_return_pct - annual_topix_return_pct
                             annual_excess_returns.append(annual_excess_return_pct)
+                            annual_excess_by_rebalance.append((rebalance_date, annual_excess_return_pct))
                     else:
                         # 累積TOPIXリターンが-100%未満の場合はスキップ（年率化不可）
                         print(f"警告: {rebalance_date}の累積TOPIXリターンが-100%未満のため、年率化をスキップします。累積TOPIXリターン: {topix_return_pct:.2f}%")
@@ -872,6 +878,7 @@ def calculate_longterm_performance(
                         annual_excess_return_pct = annual_excess_return * 100
                         if not isinstance(annual_excess_return_pct, complex):
                             annual_excess_returns.append(annual_excess_return_pct)
+                            annual_excess_by_rebalance.append((rebalance_date, annual_excess_return_pct))
             
             total_returns.append(total_return_pct)
             # excess_return_pctもNone/NaNチェック（累積値、参考用）
@@ -917,12 +924,32 @@ def calculate_longterm_performance(
     p25_annual_excess_return = np.percentile(annual_excess_returns, 25.0) if annual_excess_returns else 0.0
     min_annual_excess_return = np.min(annual_excess_returns) if annual_excess_returns else 0.0
     
+    # 年別集計（Stage0/Stage1 coarse gate 用: 2022のみ・2021のみの median/p10/win_rate）
+    by_year: Dict[str, Dict[str, Any]] = {}
+    for y in ("2020", "2021", "2022"):
+        vals = [pct for rd, pct in annual_excess_by_rebalance if rd.startswith(y)]
+        if vals:
+            by_year[y] = {
+                "median_annual_excess_return_pct": float(np.median(vals)),
+                "p10_annual_excess_return_pct": float(np.percentile(vals, 10.0)),
+                "win_rate": float(sum(1 for r in vals if r > 0) / len(vals)),
+                "num_portfolios": len(vals),
+            }
+        else:
+            by_year[y] = {
+                "median_annual_excess_return_pct": None,
+                "p10_annual_excess_return_pct": None,
+                "win_rate": None,
+                "num_portfolios": 0,
+            }
+    
     result = {
         # 目的関数用（TOPIXに対する年率超過リターン）
         # 変更: 年率化してから差を取る方法に統一（avg_annualized_excess_return_pctと一致）
         "mean_annual_excess_return_pct": mean_annual_excess_return,  # 各ポートフォリオの年率超過リターンの平均（年率化してから差を取る方法）
         "median_annual_excess_return_pct": median_annual_excess_return,  # 中央値
         "annual_excess_returns_list": annual_excess_returns,  # 個別の年率超過リターンリスト（trimmed_mean用）
+        "annual_excess_by_rebalance": annual_excess_by_rebalance,  # [(rebalance_date, pct), ...] 寄与分解用
         # 下振れ指標（下振れ罰用）
         "p10_annual_excess_return_pct": p10_annual_excess_return,  # 下位10%の平均超過リターン
         "p25_annual_excess_return_pct": p25_annual_excess_return,  # 下位25%の平均超過リターン
@@ -944,7 +971,54 @@ def calculate_longterm_performance(
         "first_rebalance": first_rebalance,
         "as_of_date": as_of_date,
         "last_date": as_of_date,  # 後方互換性のため
+        "by_year": by_year,  # Stage0/Stage1 用（2020/2021/2022 の median, p10, win_rate）
     }
+    
+    # コスト検証用: 1ポートフォリオ単位のgross/net/cost情報
+    if return_per_portfolio_details and performances:
+        per_portfolio_details = []
+        for perf in performances:
+            rd = perf.get("rebalance_date")
+            eval_d = perf.get("as_of_date", as_of_date)
+            tr = perf.get("total_return_pct")
+            topix_comp = perf.get("topix_comparison", {})
+            cost_info = topix_comp.get("cost_info", {})
+            
+            if rd and tr is not None and not pd.isna(tr):
+                rebalance_dt = dt.strptime(rd, "%Y-%m-%d")
+                eval_dt = dt.strptime(eval_d, "%Y-%m-%d")
+                holding_years = (eval_dt - rebalance_dt).days / 365.25
+                
+                if cost_info:
+                    gross = cost_info.get("gross_return_pct", tr)
+                    net = cost_info.get("net_return_pct", tr)
+                    total_cost = cost_info.get("total_cost_pct", 0.0)
+                else:
+                    gross = net = float(tr)
+                    total_cost = 0.0
+                
+                # 年率化
+                def _annualize(r, t):
+                    if t <= 0 or r is None or pd.isna(r): return None
+                    f = 1 + r / 100
+                    if f <= 0: return None
+                    return (f ** (1 / t) - 1) * 100
+                
+                per_portfolio_details.append({
+                    "rebalance_date": rd,
+                    "eval_date": eval_d,
+                    "holding_years": holding_years,
+                    "gross_return_pct": gross,
+                    "net_return_pct": net,
+                    "total_cost_pct": total_cost,
+                    "annualized_gross_pct": _annualize(gross, holding_years),
+                    "annualized_net_pct": _annualize(net, holding_years),
+                    "cost_bps": cost_bps,
+                })
+        result["per_portfolio_details"] = per_portfolio_details
+    
+    if return_raw_performances and performances:
+        result["raw_performances"] = performances
     
     return result
 
@@ -962,6 +1036,8 @@ def objective_longterm(
     as_of_date: Optional[str] = None,
     lambda_penalty: float = 0.0,
     objective_type: str = "mean",  # "mean", "median", "trimmed_mean"
+    pool_size_override: Optional[int] = None,  # CLIシナリオ用（Noneの場合はStrategyParamsデフォルト）
+    sector_cap_override: Optional[int] = None,  # CLIシナリオ用（Noneの場合はStrategyParamsデフォルト）
 ) -> float:
     """
     Optunaの目的関数（長期保有型）
@@ -1193,7 +1269,12 @@ def objective_longterm(
         roe_min=roe_min,
         liquidity_quantile_cut=liquidity_quantile_cut,
     )
-    
+    # CLIオーバーライド（シナリオ実行時）
+    if pool_size_override is not None:
+        strategy_params = replace(strategy_params, pool_size=pool_size_override)
+    if sector_cap_override is not None:
+        strategy_params = replace(strategy_params, sector_cap=sector_cap_override)
+
     # EntryScoreParamsを構築
     entry_params = EntryScoreParams(
         rsi_base=rsi_base,
@@ -1305,7 +1386,33 @@ def objective_longterm(
     trial.set_user_attr("median_excess", perf["median_annual_excess_return_pct"])
     trial.set_user_attr("win_rate", perf["win_rate"])
     trial.set_user_attr("lambda_penalty", lambda_penalty)  # 使用したλ値も保存
-    
+    # Stage0/Stage1 coarse gate 用（trial ログ JSONL に出力）
+    trial.set_user_attr("by_year", perf.get("by_year") or {})
+    trial.set_user_attr("scenario_id", f"S{strategy_params.pool_size}_{strategy_params.sector_cap}")
+    trial.set_user_attr("pool_size_actual", strategy_params.pool_size)
+    params_dict = {
+        "w_quality": strategy_params.w_quality,
+        "w_value": strategy_params.w_value,
+        "w_growth": strategy_params.w_growth,
+        "w_record_high": strategy_params.w_record_high,
+        "w_size": strategy_params.w_size,
+        "w_forward_per": strategy_params.w_forward_per,
+        "w_pbr": strategy_params.w_pbr,
+        "roe_min": strategy_params.roe_min,
+        "liquidity_quantile_cut": strategy_params.liquidity_quantile_cut,
+        "rsi_base": entry_params.rsi_base,
+        "rsi_max": entry_params.rsi_max,
+        "bb_z_base": entry_params.bb_z_base,
+        "bb_z_max": entry_params.bb_z_max,
+        "bb_weight": entry_params.bb_weight,
+        "rsi_weight": entry_params.rsi_weight,
+        "rsi_min_width": entry_params.rsi_min_width,
+        "bb_z_min_width": entry_params.bb_z_min_width,
+    }
+    params_json = json.dumps(dict(sorted(params_dict.items())), sort_keys=True, ensure_ascii=False)
+    params_hash = hashlib.sha1(params_json.encode("utf-8")).hexdigest()[:8]
+    trial.set_user_attr("params_hash", params_hash)
+
     # デバッグ用ログ出力（下振れ指標を含む）
     log_msg = (
         f"[Trial {trial.number}] "
@@ -1324,6 +1431,31 @@ def objective_longterm(
     print(log_msg)
     
     return objective_value
+
+
+def _make_trials_log_callback(random_seed: int, log_path: str):
+    """Stage0/Stage1 coarse gate 用: trial 完了ごとに scenario_id, seed, median_2022 等を JSONL に追記する。"""
+    def callback(study: optuna.Study, trial: optuna.Trial) -> None:
+        if trial.state != TrialState.COMPLETE:
+            return
+        by_year = trial.user_attrs.get("by_year") or {}
+        y2022 = by_year.get("2022") or {}
+        row = {
+            "scenario_id": trial.user_attrs.get("scenario_id", ""),
+            "seed": random_seed,
+            "trial_id": trial.number,
+            "params_hash": trial.user_attrs.get("params_hash", ""),
+            "median_2022": y2022.get("median_annual_excess_return_pct"),
+            "p10_2022": y2022.get("p10_annual_excess_return_pct"),
+            "win_rate_2022": y2022.get("win_rate"),
+            "pool_size_actual": trial.user_attrs.get("pool_size_actual"),
+        }
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"  [trials_log] 警告: ログ書き込み失敗: {e}")
+    return callback
 
 
 def main(
@@ -1353,6 +1485,8 @@ def main(
         initial_params_json: Optional[str] = None,  # 初期点として投入する最適化結果JSONファイルのパス
         local_search: bool = False,  # 局所探索モード（重要度の高いパラメータのみ探索、他は固定）
         local_search_params_json: Optional[str] = None,  # 局所探索の中心となる最適化結果JSONファイルのパス
+        pool_size: Optional[int] = None,  # 銘柄プールサイズ（Noneの場合はStrategyParamsのデフォルト80）
+        sector_cap_max: Optional[int] = None,  # 1業種あたりの最大銘柄数（Noneの場合はデフォルト4）
 ):
     """
     長期保有型の最適化を実行
@@ -1409,6 +1543,8 @@ def main(
     print(f"試行回数: {n_trials}")
     print(f"取引コスト: {cost_bps} bps")
     print(f"ランダムシード: {random_seed}")
+    if pool_size is not None or sector_cap_max is not None:
+        print(f"銘柄集合レバー: pool_size={pool_size or 80}, sector_cap={sector_cap_max or 4}")
     print("=" * 80)
     print()
     
@@ -1551,9 +1687,8 @@ def main(
     
     # 初期点として投入するパラメータを読み込む（指定されている場合）
     if initial_params_json:
-        import json
         from pathlib import Path
-        
+
         json_path = Path(initial_params_json)
         if not json_path.exists():
             print(f"⚠️  警告: 初期点として指定されたJSONファイルが見つかりません: {initial_params_json}")
@@ -1667,6 +1802,8 @@ def main(
         as_of_date=as_of_date,
         lambda_penalty=lambda_penalty,
         objective_type=objective_type,
+        pool_size_override=pool_size,
+        sector_cap_override=sector_cap_max,
     )
     
     # 既存の完了trial数を考慮
@@ -1675,6 +1812,11 @@ def main(
     completed_trials = initial_completed
     iteration = 0
     max_iterations = n_trials * 3  # 無限ループ防止（最大3倍まで試行）
+
+    # Stage0/Stage1 用 trial ログ（scenario_id, seed, median_2022, win_rate_2022 等を JSONL に出力）
+    trials_log_path = f"trials_log_{study.study_name}.jsonl"
+    trials_log_callback = _make_trials_log_callback(random_seed, trials_log_path)
+    print(f"  trial ログ: {trials_log_path}")
     
     print(f"最適化を開始します（正常に計算が完了したtrial数が{target_completed}に達するまで実行）...")
     print(f"  既存の完了trial: {initial_completed}回")
@@ -1702,6 +1844,7 @@ def main(
             n_trials=remaining,
             show_progress_bar=show_progress,
             n_jobs=optuna_n_jobs,
+            callbacks=[trials_log_callback],
         )
         
         # 完了したtrial数をカウント（COMPLETE状態のみ = 正常に計算が完了したtrial）
@@ -1822,7 +1965,12 @@ def main(
         roe_min=best_params["roe_min"],
         liquidity_quantile_cut=liquidity_quantile_cut,
     )
-    
+    # CLIオーバーライド（シナリオ実行時・test_perf用）
+    if pool_size is not None:
+        strategy_params = replace(strategy_params, pool_size=pool_size)
+    if sector_cap_max is not None:
+        strategy_params = replace(strategy_params, sector_cap=sector_cap_max)
+
     # EntryScoreParamsを構築
     entry_params = EntryScoreParams(
         rsi_base=best_params["rsi_base"],
@@ -1984,6 +2132,7 @@ def main(
             "win_rate": test_perf["win_rate"],
             "num_portfolios": test_perf["num_portfolios"],
             "mean_holding_years": test_perf["mean_holding_years"],
+            "by_year": test_perf.get("by_year"),
         },
         "normalized_params": {
             "w_quality": w_quality,
@@ -2005,7 +2154,12 @@ def main(
             "rsi_weight": 1.0 - bb_weight,
             "rsi_min_width": 10.0,  # 固定値（最小幅制約、緩和済み）
             "bb_z_min_width": 0.5,  # 固定値（最小幅制約、緩和済み）
+            "pool_size": strategy_params.pool_size,
+            "sector_cap": strategy_params.sector_cap,
         },
+        "pool_size": strategy_params.pool_size,
+        "sector_cap": strategy_params.sector_cap,
+        "scenario_id": f"S{strategy_params.pool_size}_{strategy_params.sector_cap}",
     }
     
     with open(result_file, "w", encoding="utf-8") as f:
@@ -2046,7 +2200,11 @@ if __name__ == "__main__":
                        help="目的関数の集計方法（mean: 平均、median: 中央値、trimmed_mean: 上下10%カット平均、デフォルト: mean）")
     parser.add_argument("--initial-params-json", type=str, default=None,
                        help="初期点として投入する最適化結果JSONファイルのパス（例: optimization_result_optimization_longterm_studyA_20260121_204615.json）")
-    
+    parser.add_argument("--pool-size", type=int, default=None,
+                       help="銘柄プールサイズ（Noneの場合はStrategyParamsのデフォルト80、シナリオ実行用）")
+    parser.add_argument("--sector-cap-max", type=int, default=None,
+                       help="1業種あたりの最大銘柄数（Noneの場合はデフォルト4、シナリオ実行用）")
+
     args = parser.parse_args()
     
     main(
@@ -2074,5 +2232,7 @@ if __name__ == "__main__":
         force_rebuild_cache=args.force_rebuild_cache,
         objective_type=args.objective_type,
         initial_params_json=args.initial_params_json,
+        pool_size=args.pool_size,
+        sector_cap_max=args.sector_cap_max,
     )
 
