@@ -34,7 +34,7 @@ from ..jobs.batch_longterm_run_with_regime import run_monthly_portfolio_with_reg
 from ..backtest.performance_from_dataframe import calculate_portfolio_performance_from_dataframe
 from ..config.settings import PROJECT_ROOT
 from ..config.params_registry import get_registry_entry
-from ..jobs.longterm_run import _snap_price_date
+from ..features.loader import _snap_price_date
 from ..market.regime import get_market_regime
 from dateutil.relativedelta import relativedelta
 
