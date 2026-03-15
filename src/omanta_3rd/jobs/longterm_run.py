@@ -150,18 +150,6 @@ def _entry_score(close: pd.Series) -> float:
     return np.nan
 
 
-# _entry_score_with_params, _calculate_entry_score_with_params は features/technicals.py に移動
-# （ファイル先頭のre-exportからインポート済み）
-
-
-# _deprecated_calculate_cumulative_adjustment_factor, _split_multiplier_between,
-# _get_shares_at_date, _get_latest_basis_shares, _get_shares_adjustment_factor は
-# features/adjustments.py に移動（ファイル先頭のre-exportからインポート済み）
-#
-# _snap_price_date, _snap_listed_date, _load_universe, _load_prices_window,
-# _save_fy_to_statements, _load_latest_fy, _load_fy_history, _load_latest_forecast は
-# features/loader.py に移動（ファイル先頭のre-exportからインポート済み）
-
 # Feature building
 # -----------------------------
 
