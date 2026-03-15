@@ -25,6 +25,7 @@ import pandas as pd
 from ..config.settings import EXECUTION_DATE
 from ..infra.db import connect_db, upsert
 from ..features.utils import _safe_div, _clip01, _pct_rank, _log_safe, _calc_slope
+from ..features.technicals import bb_zscore as _bb_zscore, rsi_from_series as _rsi_from_series
 from ..backtest.performance import _split_multiplier_between
 from ..features.adjustments import (
     _get_shares_at_date,
