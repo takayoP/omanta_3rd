@@ -21,7 +21,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass, replace, fields
+from dataclasses import replace, fields
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
@@ -32,15 +32,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 import multiprocessing as mp
 import sqlite3
-import threading
 import time
-
-try:
-    import tkinter as tk
-    from tkinter import ttk
-    TKINTER_AVAILABLE = True
-except ImportError:
-    TKINTER_AVAILABLE = False
 
 from ..infra.db import connect_db
 from ..jobs.longterm_run import (
@@ -60,7 +52,7 @@ from ..backtest.metrics import (
 from ..backtest.feature_cache import FeatureCache
 
 from ..features.technicals import EntryScoreParams  # noqa: F401
-from .progress_window import ProgressWindow
+from .progress_window import ProgressWindow, TKINTER_AVAILABLE
 
 
 def run_backtest_for_optimization_timeseries(
