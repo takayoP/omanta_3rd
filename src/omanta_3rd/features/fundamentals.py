@@ -1,9 +1,7 @@
 """ROE、最高益（実績/予想）、成長率"""
 
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, Tuple
 import sqlite3
-
-from ..infra.db import connect_db
 
 
 def calculate_roe(profit: Optional[float], equity: Optional[float]) -> Optional[float]:

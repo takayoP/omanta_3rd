@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, replace, fields
+from dataclasses import replace, fields
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
@@ -13,19 +13,8 @@ import pandas as pd
 import optuna
 from optuna.visualization import plot_optimization_history, plot_param_importances
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
 import multiprocessing as mp
 import sqlite3
-import threading
-import time
-
-try:
-    import tkinter as tk
-    from tkinter import ttk
-    TKINTER_AVAILABLE = True
-except ImportError:
-    TKINTER_AVAILABLE = False
-
 from ..infra.db import connect_db
 from ..jobs.longterm_run import (
     StrategyParams,
@@ -40,128 +29,16 @@ from ..backtest.performance import (
 )
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 
-
-@dataclass
-class EntryScoreParams:
-    """entry_score計算のパラメータ（順張り/逆張り両対応）"""
-    rsi_base: float = 50.0  # RSI基準値（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
-    rsi_max: float = 80.0  # RSI上限（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
-    bb_z_base: float = 0.0  # BB Z-score基準値（bb_z_max > bb_z_base: 順張り、bb_z_max < bb_z_base: 逆張り）
-    bb_z_max: float = 3.0  # BB Z-score上限（bb_z_max > bb_z_base: 順張り、bb_z_max < bb_z_base: 逆張り）
-    bb_weight: float = 0.5  # BBとRSIの重み（BB側）
-    rsi_weight: float = 0.5  # BBとRSIの重み（RSI側）
-    # 最小幅制約（分母が0に近くなるのを防ぐ）
-    rsi_min_width: float = 10.0  # RSIの最小幅（abs(rsi_max - rsi_base) >= rsi_min_width、緩和: 20.0 → 10.0）
-    bb_z_min_width: float = 0.5  # BB Z-scoreの最小幅（abs(bb_z_max - bb_z_base) >= bb_z_min_width、緩和: 1.0 → 0.5）
-
-
-def _entry_score_with_params(
-    close: pd.Series,
-    params: EntryScoreParams,
-) -> float:
-    """
-    パラメータ化されたentry_score計算
-    
-    Args:
-        close: 終値のSeries
-        params: EntryScoreParams
-    
-    Returns:
-        entry_score
-    """
-    from ..jobs.longterm_run import _bb_zscore, _rsi_from_series
-    
-    # 以前の実装: 3つの期間（20日、60日、200日）でBBとRSIの値を計算し、最大値を採用
-    bb_z_values = []
-    rsi_values = []
-    
-    for n in (20, 60, 200):
-        z = _bb_zscore(close, n)
-        rsi = _rsi_from_series(close, n)
-        
-        if not pd.isna(z):
-            bb_z_values.append(z)
-        if not pd.isna(rsi):
-            rsi_values.append(rsi)
-    
-    # BBとRSIの値の最大値を採用（以前の実装）
-    if not bb_z_values and not rsi_values:
-        return np.nan
-    
-    # BB値の最大値を採用（順張りの場合は最大値、逆張りの場合は最小値）
-    # ただし、スコア計算時に順張り/逆張りを考慮するため、ここでは単純に最大値を取る
-    bb_z = np.nanmax(bb_z_values) if bb_z_values else np.nan
-    rsi = np.nanmax(rsi_values) if rsi_values else np.nan
-    
-    # スコア計算
-    bb_score = np.nan
-    rsi_score = np.nan
-
-    if not pd.isna(bb_z):
-        # 最小幅チェック（分母が0に近くなるのを防ぐ）
-        bb_z_diff = params.bb_z_max - params.bb_z_base
-        if abs(bb_z_diff) >= params.bb_z_min_width:
-            # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
-            # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
-            raw_score = (bb_z - params.bb_z_base) / bb_z_diff
-            # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
-            bb_score = np.clip(raw_score, 0.0, 1.0)
-        else:
-            # 最小幅未満の場合はNaN（無効）
-            bb_score = np.nan
-                
-    if not pd.isna(rsi):
-        # 最小幅チェック（分母が0に近くなるのを防ぐ）
-        rsi_diff = params.rsi_max - params.rsi_base
-        if abs(rsi_diff) >= params.rsi_min_width:
-            # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
-            # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
-            raw_score = (rsi - params.rsi_base) / rsi_diff
-            # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
-            rsi_score = np.clip(raw_score, 0.0, 1.0)
-        else:
-            # 最小幅未満の場合はNaN（無効）
-            rsi_score = np.nan
-
-    # 重み付き合計
-    total_weight = params.bb_weight + params.rsi_weight
-    if total_weight > 0:
-        if not pd.isna(bb_score) and not pd.isna(rsi_score):
-            return float((params.bb_weight * bb_score + params.rsi_weight * rsi_score) / total_weight)
-        elif not pd.isna(bb_score):
-            return float(bb_score)
-        elif not pd.isna(rsi_score):
-            return float(rsi_score)
-    
-    return np.nan
-
-
-def _calculate_entry_score_with_params(
-    feat: pd.DataFrame,
-    prices_win: pd.DataFrame,
-    params: EntryScoreParams,
-) -> pd.DataFrame:
-    """
-    パラメータ化されたentry_scoreを計算
-    
-    Args:
-        feat: 特徴量DataFrame
-        prices_win: 価格データ
-        params: EntryScoreParams
-    
-    Returns:
-        entry_scoreが追加されたfeat
-    """
-    close_map = {
-        c: g["adj_close"].reset_index(drop=True)
-        for c, g in prices_win.groupby("code")
-    }
-    feat["entry_score"] = feat["code"].apply(
-        lambda c: _entry_score_with_params(close_map.get(c), params)
-        if c in close_map
-        else np.nan
-    )
-    return feat
+# ---------------------------------------------------------------------------
+# Re-exports from features/technicals.py（後方互換性維持）
+# ---------------------------------------------------------------------------
+from ..features.technicals import (  # noqa: F401
+    EntryScoreParams,
+    _entry_score_with_params,
+    _calculate_entry_score_with_params,
+)
+from .progress_window import ProgressWindow, TKINTER_AVAILABLE  # noqa: F401
+from .optimize_timeseries import _select_portfolio_for_rebalance_date  # noqa: F401
 
 
 def _select_portfolio_with_params(
@@ -330,71 +207,6 @@ def _select_portfolio_with_params(
     return sel_df
 
 
-def _run_single_backtest(
-    rebalance_date: str,
-    strategy_params_dict: dict,
-    entry_params_dict: dict,
-    as_of_date: Optional[str] = None,
-    save_portfolio_to_db: bool = False,
-) -> Optional[Dict[str, Any]]:
-    """
-    単一のリバランス日に対するバックテスト実行（並列化用、最適化版）
-    
-    Args:
-        rebalance_date: リバランス日
-        strategy_params_dict: StrategyParamsを辞書化したもの
-        entry_params_dict: EntryScoreParamsを辞書化したもの
-        as_of_date: 評価日
-        save_portfolio_to_db: ポートフォリオをDBに保存するか（デフォルト: False、後で一括保存）
-    
-    Returns:
-        パフォーマンス結果（エラー時はNone）
-    """
-    try:
-        # 辞書からdataclassに復元
-        strategy_params = StrategyParams(**strategy_params_dict)
-        entry_params = EntryScoreParams(**entry_params_dict)
-        
-        # 1) feat を必ず作る（read_only失敗ならread_writeへ）
-        try:
-            with connect_db(read_only=True) as conn:
-                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-        except sqlite3.OperationalError as e:
-            # 読み取り専用エラーの場合は通常の接続を使用
-            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
-                with connect_db(read_only=False) as conn:
-                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-            else:
-                raise
-        
-        # 2) ここからは共通処理（exceptの外！）
-        if feat is None or feat.empty:
-            return None
-        
-        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
-        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
-        
-        if portfolio is None or portfolio.empty:
-            return None
-        
-        # 3) perf がDBのportfolioを読むなら、保存してから計算が必要
-        if save_portfolio_to_db:
-            with connect_db(read_only=False) as conn:
-                save_portfolio(conn, portfolio)
-        
-        # パフォーマンスを計算（DBからポートフォリオを読む設計）
-        perf = calculate_portfolio_performance(rebalance_date, as_of_date)
-        
-        # ポートフォリオ情報を結果に含める（後で一括保存するため）
-        if isinstance(perf, dict) and "error" not in perf:
-            perf["_portfolio"] = portfolio.to_dict("records")  # 一時的に保存
-            return perf
-        return None
-    except Exception as e:
-        print(f"エラー ({rebalance_date}): {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 def _calculate_performance_single(
     rebalance_date: str,
     as_of_date: Optional[str],
@@ -416,59 +228,6 @@ def _calculate_performance_single(
     except Exception as e:
         print(f"パフォーマンス計算エラー ({rebalance_date}): {e}")
     return None
-
-
-def _select_portfolio_for_rebalance_date(
-    rebalance_date: str,
-    strategy_params_dict: dict,
-    entry_params_dict: dict,
-) -> Optional[pd.DataFrame]:
-    """
-    単一のリバランス日に対するポートフォリオ選定のみ（並列化用）
-    
-    【注意】この関数は「ポートフォリオ選定のみ」を行います。パフォーマンス計算は行いません。
-    長期保有型と月次リバランス型の両方で使用可能です。
-    違いは「パフォーマンス計算方法」のみです（長期保有型：固定ホライズン評価、月次リバランス型：月次リターン系列）。
-    
-    Args:
-        rebalance_date: リバランス日
-        strategy_params_dict: StrategyParamsを辞書化したもの
-        entry_params_dict: EntryScoreParamsを辞書化したもの
-    
-    Returns:
-        ポートフォリオDataFrame（エラー時はNone）
-    """
-    try:
-        # 辞書からdataclassに復元
-        strategy_params = StrategyParams(**strategy_params_dict)
-        entry_params = EntryScoreParams(**entry_params_dict)
-        
-        # feat を必ず作る（read_only失敗ならread_writeへ）
-        try:
-            with connect_db(read_only=True) as conn:
-                feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-        except sqlite3.OperationalError as e:
-            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
-                with connect_db(read_only=False) as conn:
-                    feat = build_features(conn, rebalance_date, strategy_params=strategy_params, entry_params=entry_params)
-            else:
-                raise
-        
-        if feat is None or feat.empty:
-            return None
-        
-        # ポートフォリオを選択（以前のスコア比例ウェイト戦略の選定ロジックを使用、重みは等ウェイト）
-        portfolio = _select_portfolio_with_params(feat, strategy_params, entry_params)
-        
-        if portfolio is None or portfolio.empty:
-            return None
-        
-        return portfolio
-    except Exception as e:
-        print(f"エラー ({rebalance_date}): {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 
 def run_backtest_for_optimization(
@@ -728,177 +487,6 @@ def objective(
     )
     
     return objective_value
-
-
-class ProgressWindow:
-    """進捗表示用のポップアップウィンドウ"""
-    
-    def __init__(self, n_trials: int):
-        if not TKINTER_AVAILABLE:
-            self.root = None
-            return
-        
-        self.root = tk.Tk()
-        self.root.title("最適化進捗")
-        self.root.geometry("500x300")
-        self.root.resizable(False, False)
-        
-        # ラベル
-        self.label = tk.Label(
-            self.root,
-            text="最適化を実行中...",
-            font=("Arial", 12, "bold"),
-            pady=10
-        )
-        self.label.pack()
-        
-        # 進捗バー
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(
-            self.root,
-            variable=self.progress_var,
-            maximum=n_trials,
-            length=400,
-            mode='determinate'
-        )
-        self.progress_bar.pack(pady=10)
-        
-        # 進捗テキスト
-        self.progress_text = tk.Label(
-            self.root,
-            text=f"試行: 0 / {n_trials}",
-            font=("Arial", 10)
-        )
-        self.progress_text.pack()
-        
-        # 最良値表示
-        self.best_value_label = tk.Label(
-            self.root,
-            text="最良値: -",
-            font=("Arial", 10)
-        )
-        self.best_value_label.pack(pady=5)
-        
-        # 現在の試行情報
-        self.current_trial_label = tk.Label(
-            self.root,
-            text="",
-            font=("Arial", 9),
-            fg="gray"
-        )
-        self.current_trial_label.pack(pady=5)
-        
-        # 経過時間
-        self.elapsed_time_label = tk.Label(
-            self.root,
-            text="経過時間: 0秒",
-            font=("Arial", 9),
-            fg="gray"
-        )
-        self.elapsed_time_label.pack(pady=5)
-        
-        self.n_trials = n_trials
-        self.current_trial = 0
-        self.best_value = None  # Noneで初期化（最初の値で更新）
-        self.start_time = time.time()
-        
-        # ウィンドウを更新
-        self.update_window()
-    
-    def update_window(self):
-        """ウィンドウを更新"""
-        if self.root is None:
-            return
-        
-        try:
-            # 経過時間を更新
-            elapsed = int(time.time() - self.start_time)
-            self.elapsed_time_label.config(text=f"経過時間: {elapsed}秒")
-            
-            # ウィンドウを更新
-            self.root.update()
-        except:
-            pass
-    
-    def update(self, trial_number: int, value: Optional[float] = None, params: Optional[Dict] = None):
-        """進捗を更新"""
-        if self.root is None:
-            return
-        
-        self.current_trial = trial_number
-        
-        # 進捗バーを更新
-        self.progress_var.set(trial_number)
-        
-        # 進捗テキストを更新
-        self.progress_text.config(text=f"試行: {trial_number} / {self.n_trials}")
-        
-        # 最良値を更新（値がNoneでない場合、かつ現在の最良値より良い場合）
-        if value is not None:
-            # Optunaは最大化を目指すので、値が大きいほど良い
-            if self.best_value is None or value > self.best_value:
-                self.best_value = value
-                print(f"[ProgressWindow] 最良値が更新されました: {self.best_value:.4f}")
-            # 常に最新の最良値を表示
-            if self.best_value is not None:
-                self.best_value_label.config(text=f"最良値: {self.best_value:.4f}")
-        
-        # 現在の試行情報を更新
-        if params:
-            param_str = ", ".join([f"{k}={v:.3f}" for k, v in list(params.items())[:3]])
-            if len(params) > 3:
-                param_str += "..."
-            self.current_trial_label.config(text=f"試行 {trial_number}: {param_str}")
-        
-        self.update_window()
-    
-    def close(self):
-        """ウィンドウを閉じる"""
-        if self.root is None:
-            return
-        
-        try:
-            self.root.quit()
-            self.root.destroy()
-        except:
-            pass
-    
-    def run(self):
-        """ウィンドウを実行（別スレッドで）"""
-        if self.root is None:
-            return
-        
-        # Windows環境では、mainloop()の代わりに定期的にupdate()を呼び出す
-        def _update_loop():
-            while self.root is not None:
-                try:
-                    if sys.platform == 'win32':
-                        # Windowsでは、update()を定期的に呼び出す
-                        self.root.update()
-                        time.sleep(0.1)  # 100msごとに更新
-                    else:
-                        # その他のOSでは、mainloop()を使用
-                        self.root.mainloop()
-                        break
-                except Exception as e:
-                    # ウィンドウが閉じられた場合など
-                    break
-        
-        thread = threading.Thread(target=_update_loop, daemon=True)
-        thread.start()
-        
-        # Windows環境では、定期的にupdate()を呼び出す
-        if sys.platform == 'win32':
-            def _update_loop():
-                while self.root is not None:
-                    try:
-                        self.root.update()
-                        time.sleep(0.1)  # 100msごとに更新
-                    except:
-                        break
-            
-            update_thread = threading.Thread(target=_update_loop, daemon=True)
-            update_thread.start()
 
 
 def main(

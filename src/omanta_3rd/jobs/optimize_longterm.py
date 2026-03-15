@@ -39,8 +39,8 @@ from ..jobs.longterm_run import (
     select_portfolio,
     save_features,
     save_portfolio,
-    _snap_price_date,
 )
+from ..features.loader import _snap_price_date
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..backtest.feature_cache import FeatureCache
 from ..backtest.performance import calculate_portfolio_performance

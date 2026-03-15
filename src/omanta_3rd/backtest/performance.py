@@ -31,8 +31,6 @@ def _get_next_trading_day(conn, date: str, max_date: Optional[str] = None) -> Op
     Returns:
         翌営業日（YYYY-MM-DD）、存在しない場合はNone
     """
-    from datetime import datetime
-    
     # データベースから、基準日より後の日付で、価格データ（openまたはclose）がNULLでない日付を取得
     # 最大7日分を確認
     # 重要: max_dateが指定されている場合、max_date以前のデータのみを参照（データリーク防止）
