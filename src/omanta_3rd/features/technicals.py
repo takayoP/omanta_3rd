@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, List, Any
 import sqlite3
 
@@ -9,6 +10,20 @@ import numpy as np
 import pandas as pd
 
 from ..infra.db import connect_db
+
+
+@dataclass
+class EntryScoreParams:
+    """entry_score計算のパラメータ（順張り/逆張り両対応）"""
+    rsi_base: float = 50.0    # RSI基準値（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
+    rsi_max: float = 80.0     # RSI上限
+    bb_z_base: float = 0.0   # BB Z-score基準値
+    bb_z_max: float = 3.0    # BB Z-score上限
+    bb_weight: float = 0.5   # BBとRSIの重み（BB側）
+    rsi_weight: float = 0.5  # BBとRSIの重み（RSI側）
+    # 最小幅制約（分母が0に近くなるのを防ぐ）
+    rsi_min_width: float = 10.0   # RSIの最小幅
+    bb_z_min_width: float = 0.5   # BB Z-scoreの最小幅
 
 
 def calculate_bollinger_bands(

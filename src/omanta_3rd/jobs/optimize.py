@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, replace, fields
+from dataclasses import replace, fields
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
@@ -40,128 +40,14 @@ from ..backtest.performance import (
 )
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 
-
-@dataclass
-class EntryScoreParams:
-    """entry_score計算のパラメータ（順張り/逆張り両対応）"""
-    rsi_base: float = 50.0  # RSI基準値（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
-    rsi_max: float = 80.0  # RSI上限（rsi_max > rsi_base: 順張り、rsi_max < rsi_base: 逆張り）
-    bb_z_base: float = 0.0  # BB Z-score基準値（bb_z_max > bb_z_base: 順張り、bb_z_max < bb_z_base: 逆張り）
-    bb_z_max: float = 3.0  # BB Z-score上限（bb_z_max > bb_z_base: 順張り、bb_z_max < bb_z_base: 逆張り）
-    bb_weight: float = 0.5  # BBとRSIの重み（BB側）
-    rsi_weight: float = 0.5  # BBとRSIの重み（RSI側）
-    # 最小幅制約（分母が0に近くなるのを防ぐ）
-    rsi_min_width: float = 10.0  # RSIの最小幅（abs(rsi_max - rsi_base) >= rsi_min_width、緩和: 20.0 → 10.0）
-    bb_z_min_width: float = 0.5  # BB Z-scoreの最小幅（abs(bb_z_max - bb_z_base) >= bb_z_min_width、緩和: 1.0 → 0.5）
-
-
-def _entry_score_with_params(
-    close: pd.Series,
-    params: EntryScoreParams,
-) -> float:
-    """
-    パラメータ化されたentry_score計算
-    
-    Args:
-        close: 終値のSeries
-        params: EntryScoreParams
-    
-    Returns:
-        entry_score
-    """
-    from ..jobs.longterm_run import _bb_zscore, _rsi_from_series
-    
-    # 以前の実装: 3つの期間（20日、60日、200日）でBBとRSIの値を計算し、最大値を採用
-    bb_z_values = []
-    rsi_values = []
-    
-    for n in (20, 60, 200):
-        z = _bb_zscore(close, n)
-        rsi = _rsi_from_series(close, n)
-        
-        if not pd.isna(z):
-            bb_z_values.append(z)
-        if not pd.isna(rsi):
-            rsi_values.append(rsi)
-    
-    # BBとRSIの値の最大値を採用（以前の実装）
-    if not bb_z_values and not rsi_values:
-        return np.nan
-    
-    # BB値の最大値を採用（順張りの場合は最大値、逆張りの場合は最小値）
-    # ただし、スコア計算時に順張り/逆張りを考慮するため、ここでは単純に最大値を取る
-    bb_z = np.nanmax(bb_z_values) if bb_z_values else np.nan
-    rsi = np.nanmax(rsi_values) if rsi_values else np.nan
-    
-    # スコア計算
-    bb_score = np.nan
-    rsi_score = np.nan
-
-    if not pd.isna(bb_z):
-        # 最小幅チェック（分母が0に近くなるのを防ぐ）
-        bb_z_diff = params.bb_z_max - params.bb_z_base
-        if abs(bb_z_diff) >= params.bb_z_min_width:
-            # z=bb_z_baseのとき0、z=bb_z_maxのとき1になる線形変換
-            # bb_z_max < bb_z_base の場合は逆張り（zが低いほど高スコア）
-            raw_score = (bb_z - params.bb_z_base) / bb_z_diff
-            # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
-            bb_score = np.clip(raw_score, 0.0, 1.0)
-        else:
-            # 最小幅未満の場合はNaN（無効）
-            bb_score = np.nan
-                
-    if not pd.isna(rsi):
-        # 最小幅チェック（分母が0に近くなるのを防ぐ）
-        rsi_diff = params.rsi_max - params.rsi_base
-        if abs(rsi_diff) >= params.rsi_min_width:
-            # RSI=rsi_baseのとき0、RSI=rsi_maxのとき1になる線形変換
-            # rsi_max < rsi_base の場合は逆張り（RSIが低いほど高スコア）
-            raw_score = (rsi - params.rsi_base) / rsi_diff
-            # まずはsigmoidを入れずにclip(0,1)のまま（逆順許可だけの効果を見る）
-            rsi_score = np.clip(raw_score, 0.0, 1.0)
-        else:
-            # 最小幅未満の場合はNaN（無効）
-            rsi_score = np.nan
-
-    # 重み付き合計
-    total_weight = params.bb_weight + params.rsi_weight
-    if total_weight > 0:
-        if not pd.isna(bb_score) and not pd.isna(rsi_score):
-            return float((params.bb_weight * bb_score + params.rsi_weight * rsi_score) / total_weight)
-        elif not pd.isna(bb_score):
-            return float(bb_score)
-        elif not pd.isna(rsi_score):
-            return float(rsi_score)
-    
-    return np.nan
-
-
-def _calculate_entry_score_with_params(
-    feat: pd.DataFrame,
-    prices_win: pd.DataFrame,
-    params: EntryScoreParams,
-) -> pd.DataFrame:
-    """
-    パラメータ化されたentry_scoreを計算
-    
-    Args:
-        feat: 特徴量DataFrame
-        prices_win: 価格データ
-        params: EntryScoreParams
-    
-    Returns:
-        entry_scoreが追加されたfeat
-    """
-    close_map = {
-        c: g["adj_close"].reset_index(drop=True)
-        for c, g in prices_win.groupby("code")
-    }
-    feat["entry_score"] = feat["code"].apply(
-        lambda c: _entry_score_with_params(close_map.get(c), params)
-        if c in close_map
-        else np.nan
-    )
-    return feat
+# ---------------------------------------------------------------------------
+# Re-exports from features/technicals.py（後方互換性維持）
+# ---------------------------------------------------------------------------
+from ..features.technicals import (  # noqa: F401
+    EntryScoreParams,
+    _entry_score_with_params,
+    _calculate_entry_score_with_params,
+)
 
 
 def _select_portfolio_with_params(
