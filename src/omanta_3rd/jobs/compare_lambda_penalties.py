@@ -31,7 +31,6 @@ from ..backtest.performance_from_dataframe import calculate_portfolio_performanc
 from ..config.settings import PROJECT_ROOT
 from ..config.params_registry import get_registry_entry, load_params_by_id_longterm
 from ..features.loader import _snap_price_date
-from ..jobs.params_utils import normalize_params
 from ..jobs.optimize_longterm import main as optimize_longterm_main
 from ..jobs.reoptimize_all_candidates import save_params_file, determine_strategy_mode
 from dateutil.relativedelta import relativedelta

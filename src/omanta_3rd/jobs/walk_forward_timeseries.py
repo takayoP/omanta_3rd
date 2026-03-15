@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 import optuna
-from ..infra.db import connect_db
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..jobs.optimize_timeseries import (
     run_backtest_for_optimization_timeseries,
@@ -30,7 +29,7 @@ from ..jobs.longterm_run import StrategyParams
 from ..jobs.optimize import EntryScoreParams
 from ..backtest.timeseries import calculate_timeseries_returns
 from ..backtest.eval_common import calculate_metrics_from_timeseries_data, get_git_commit_hash
-from dataclasses import replace, fields
+from dataclasses import replace
 
 
 def split_dates_into_folds(

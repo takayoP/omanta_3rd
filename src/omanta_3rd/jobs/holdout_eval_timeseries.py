@@ -18,7 +18,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
-from ..infra.db import connect_db
 from ..jobs.batch_longterm_run import get_monthly_rebalance_dates
 from ..jobs.optimize_timeseries import (
     run_backtest_for_optimization_timeseries,

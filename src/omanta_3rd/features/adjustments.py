@@ -68,68 +68,6 @@ def _deprecated_calculate_cumulative_adjustment_factor(conn, code: str, target_d
     return caf
 
 
-def _split_multiplier_between(conn, code: str, start_date: str, end_date: str) -> float:
-    """
-    FY期末から評価日までの分割・併合による株数倍率を計算
-
-    (start_date, end_date] の期間に発生したAdjustmentFactorから、
-    株数倍率 = ∏(1 / adjustment_factor) を計算します。
-
-    例: 1:3分割（adjustment_factor = 0.333333）の場合、
-    株数倍率 = 1 / 0.333333 ≈ 3.0
-
-    注意: 丸めは行いません（端数が出る比率や制度変更・権利関係などで
-          綺麗な逆整数にならないケースに対応するため）。
-
-    Args:
-        conn: データベース接続
-        code: 銘柄コード
-        start_date: 開始日（YYYY-MM-DD、FY期末）
-        end_date: 終了日（YYYY-MM-DD、評価日）
-
-    Returns:
-        株数倍率（分割・併合がない場合は1.0）
-    """
-    df = pd.read_sql_query(
-        """
-        SELECT date, adjustment_factor
-        FROM prices_daily
-        WHERE code = ?
-          AND date > ?
-          AND date <= ?
-          AND adjustment_factor IS NOT NULL
-          AND adjustment_factor != 1.0
-        ORDER BY date ASC
-        """,
-        conn,
-        params=(code, start_date, end_date),
-    )
-
-    if df.empty:
-        return 1.0
-
-    mult = 1.0
-    adjustment_dates = []
-    for _, row in df.iterrows():
-        adj_factor = row["adjustment_factor"]
-        if pd.notna(adj_factor) and adj_factor > 0:
-            mult *= (1.0 / float(adj_factor))
-            if "date" in row:
-                adjustment_dates.append(row["date"])
-
-    if mult > 100 or mult < 0.01:
-        import warnings
-        warnings.warn(
-            f"Unusual split multiplier detected for code {code}: {mult:.6f} "
-            f"(start_date={start_date}, end_date={end_date}). "
-            f"This may indicate data quality issues.",
-            UserWarning,
-            stacklevel=2
-        )
-
-    return mult
-
-
 def _get_shares_at_date(conn, code: str, target_date: str) -> tuple:
     """
     指定日の実際の発行済み株式数（自己株式除く）と純資産を取得
