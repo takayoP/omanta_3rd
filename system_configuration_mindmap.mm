@@ -9,7 +9,7 @@
 </node>
 <node CREATED="1700000000006" ID="ID_1_2" MODIFIED="1700000000006" TEXT="技術スタック">
 <node CREATED="1700000000007" ID="ID_1_2_1" MODIFIED="1700000000007" TEXT="データソース: J-Quants API"/>
-<node CREATED="1700000000008" ID="ID_1_2_2" MODIFIED="1700000000008" TEXT="DB: SQLite（%LocalAppData%\omanta_3rd\db\jquants.sqlite）"/>
+<node CREATED="1700000000008" ID="ID_1_2_2" MODIFIED="1700000000008" TEXT="DB: SQLite（.env の DB_PATH、未設定時は data/db/jquants.sqlite 等）"/>
 <node CREATED="1700000000009" ID="ID_1_2_3" MODIFIED="1700000000009" TEXT="言語: Python 3.9+"/>
 <node CREATED="1700000000010" ID="ID_1_2_4" MODIFIED="1700000000010" TEXT="最適化: Optuna"/>
 <node CREATED="1700000000011" ID="ID_1_2_5" MODIFIED="1700000000011" TEXT="主依存: pandas, numpy, optuna, requests, python-dotenv"/>
@@ -27,8 +27,9 @@
 <node CREATED="1700000000021" ID="ID_2_2_1" MODIFIED="1700000000021" TEXT="目的: 時系列の超過リターン（vs TOPIX）"/>
 <node CREATED="1700000000022" ID="ID_2_2_2" MODIFIED="1700000000022" TEXT="入替: 月次で全入れ替え"/>
 <node CREATED="1700000000023" ID="ID_2_2_3" MODIFIED="1700000000023" TEXT="意思決定: 最適化パラメータで自動選定"/>
-<node CREATED="1700000000024" ID="ID_2_2_4" MODIFIED="1700000000024" TEXT="主ジョブ: prepare_features, run_strategy, optimize_strategy"/>
-<node CREATED="1700000000025" ID="ID_2_2_5" MODIFIED="1700000000025" TEXT="テーブル: strategy_runs, portfolio_snapshots"/>
+<node CREATED="1700000000024" ID="ID_2_2_4" MODIFIED="1700000000024" TEXT="主ジョブ: optimize_timeseries（月次最適化）, prepare_features, run_strategy"/>
+<node CREATED="1700000000025" ID="ID_2_2_5" MODIFIED="1700000000025" TEXT="テーブル: strategy_runs, portfolio_snapshots, monthly_rebalance_*（接頭辞）"/>
+<node CREATED="1700000000026" ID="ID_2_2_6" MODIFIED="1700000000026" TEXT="実運用実行: scripts/run_production_optimization.ps1、docs/5DAY_PRODUCTION_OPTIMIZATION_PLAN.md"/>
 </node>
 </node>
 <node CREATED="1700000000026" ID="ID_3" MODIFIED="1700000000026" POSITION="right" TEXT="3. ディレクトリ・モジュール構成">
@@ -40,8 +41,8 @@
 <node CREATED="1700000000032" ID="ID_3_1_5" MODIFIED="1700000000032" TEXT="*.py … ルート直下スタンドアロン（検証・可視化・DB保存等）"/>
 <node CREATED="1700000000033" ID="ID_3_1_6" MODIFIED="1700000000033" TEXT="*.ps1 / *.bat … 実行用シェル"/>
 </node>
-<node CREATED="1700000000034" ID="ID_3_2" MODIFIED="1700000000034" TEXT="src/omanta_3rd/ パッケージ">
-<node CREATED="1700000000035" ID="ID_3_2_1" MODIFIED="1700000000035" TEXT="backtest/ … 時系列P/L, metrics, performance, eval_common, feature_cache"/>
+<node CREATED="1700000000034" ID="ID_3_2" MODIFIED="1700000000034" TEXT="src/omanta_3rd/ パッケージ（依存は下位→上位の一方向、CLAUDE.md）">
+<node CREATED="1700000000035" ID="ID_3_2_1" MODIFIED="1700000000035" TEXT="backtest/ … 時系列P/L, metrics, performance, eval_common, feature_cache（longterm_run は遅延 import）"/>
 <node CREATED="1700000000036" ID="ID_3_2_2" MODIFIED="1700000000036" TEXT="config/ … settings, strategy, params_registry, regime_policy, score_profile"/>
 <node CREATED="1700000000037" ID="ID_3_2_3" MODIFIED="1700000000037" TEXT="features/ … fundamentals, valuation, technicals, universe"/>
 <node CREATED="1700000000038" ID="ID_3_2_4" MODIFIED="1700000000038" TEXT="infra/ … db, jquants, repositories（features_repo, run_repo）"/>
@@ -57,7 +58,8 @@
 <node CREATED="1700000000046" ID="ID_4_1" MODIFIED="1700000000046" TEXT="メインジョブ（月次リバランス型）">
 <node CREATED="1700000000047" ID="ID_4_1_1" MODIFIED="1700000000047" TEXT="prepare_features … 特徴量＋ref score を v1_ref で計算して features_monthly に保存"/>
 <node CREATED="1700000000048" ID="ID_4_1_2" MODIFIED="1700000000048" TEXT="run_strategy … 選定のみ（longterm|monthly）、portfolio_snapshots 保存可"/>
-<node CREATED="1700000000049" ID="ID_4_1_3" MODIFIED="1700000000049" TEXT="optimize_strategy … 月次のみ、PolicyParams 6 パラメータ Optuna"/>
+<node CREATED="1700000000049" ID="ID_4_1_3" MODIFIED="1700000000049" TEXT="optimize_timeseries … 月次リバランス型最適化（StrategyParams+EntryScoreParams, Sharpe_excess, --cost）"/>
+<node CREATED="1700000000050" ID="ID_4_1_4" MODIFIED="1700000000050" TEXT="run_production_optimization.ps1 … 実運用向け 200 trials, cost 20bps"/>
 </node>
 <node CREATED="1700000000062" ID="ID_4_4" MODIFIED="1700000000062" TEXT="実行・バッチ系">
 <node CREATED="1700000000063" ID="ID_4_4_1" MODIFIED="1700000000063" TEXT="etl_update.py … ETL（listed/prices/fins/indices）"/>
@@ -96,7 +98,8 @@
 <node CREATED="1700000000093" ID="ID_6_1" MODIFIED="1700000000093" TEXT="メイン（月次リバランス型）">
 <node CREATED="1700000000094" ID="ID_6_1_1" MODIFIED="1700000000094" TEXT="python -m omanta_3rd.jobs.prepare_features --asof 2024-12-31"/>
 <node CREATED="1700000000095" ID="ID_6_1_2" MODIFIED="1700000000095" TEXT="python -m omanta_3rd.jobs.run_strategy --mode monthly --asof 2024-12-31"/>
-<node CREATED="1700000000096" ID="ID_6_1_3" MODIFIED="1700000000096" TEXT="python -m omanta_3rd.jobs.optimize_strategy --start 2021-01-01 --end 2024-12-31 --n-trials 20"/>
+<node CREATED="1700000000096" ID="ID_6_1_3" MODIFIED="1700000000096" TEXT="python -m omanta_3rd.jobs.optimize_timeseries --start 2021-01-01 --end 2024-12-31 --n-trials 200 --cost 20 --no-progress-window"/>
+<node CREATED="1700000000097" ID="ID_6_1_4" MODIFIED="1700000000097" TEXT=".\scripts\run_production_optimization.ps1（実運用・BLAS環境変数込み）"/>
 </node>
 <node CREATED="1700000000097" ID="ID_6_2" MODIFIED="1700000000097" TEXT="データ・DB">
 <node CREATED="1700000000098" ID="ID_6_2_1" MODIFIED="1700000000098" TEXT="python -m omanta_3rd.jobs.init_db"/>
@@ -107,7 +110,7 @@
 <node CREATED="1700000000102" ID="ID_6_3_2" MODIFIED="1700000000102" TEXT="python -m omanta_3rd.jobs.backtest --rebalance-date 2025-12-19 --save-to-db"/>
 </node>
 <node CREATED="1700000000107" ID="ID_6_5" MODIFIED="1700000000107" TEXT="ルート・シェル">
-<node CREATED="1700000000108" ID="ID_6_5_1" MODIFIED="1700000000108" TEXT="update_all_data.py, run_walk_forward_analysis.ps1, run_optimization_with_cache_rebuild.ps1 等"/>
+<node CREATED="1700000000108" ID="ID_6_5_1" MODIFIED="1700000000108" TEXT="update_all_data.py, run_production_optimization.ps1, run_walk_forward_analysis.ps1 等"/>
 </node>
 </node>
 <node CREATED="1700000000109" ID="ID_7" MODIFIED="1700000000109" POSITION="right" TEXT="7. データフロー（簡略）">

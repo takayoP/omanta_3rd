@@ -3,7 +3,7 @@
 <node CREATED="1700000000000" ID="ID_ROOT" MODIFIED="1700000000000" TEXT="投資アルゴリズム データベース構造">
 <node CREATED="1700000000001" ID="ID_1" MODIFIED="1700000000001" POSITION="right" TEXT="データベース情報">
 <node CREATED="1700000000002" ID="ID_1_1" MODIFIED="1700000000002" TEXT="種類: SQLite"/>
-<node CREATED="1700000000003" ID="ID_1_2" MODIFIED="1700000000003" TEXT="パス: C:\Users\takay\AppData\Local\omanta_3rd\db\jquants.sqlite"/>
+<node CREATED="1700000000003" ID="ID_1_2" MODIFIED="1700000000003" TEXT="パス: .env の DB_PATH（未設定時は data/db/jquants.sqlite 等、環境により異なる）"/>
 </node>
 <node CREATED="1700000000004" ID="ID_2" MODIFIED="1700000000004" POSITION="right" TEXT="1. 共通テーブル（両方の運用スタイルで使用）">
 <node CREATED="1700000000005" ID="ID_2_1" MODIFIED="1700000000005" TEXT="listed_info（銘柄属性）">
@@ -170,6 +170,13 @@
 </node>
 </node>
 </node>
+<node CREATED="1700000000139" ID="ID_3c" MODIFIED="1700000000139" POSITION="right" TEXT="3b. 月次リバランス型テーブル（monthly_rebalance_ 接頭辞）">
+<node CREATED="1700000000140" ID="ID_3c_1" MODIFIED="1700000000140" TEXT="monthly_rebalance_final_selected_candidates: 最終選定候補・パラメータ"/>
+<node CREATED="1700000000141" ID="ID_3c_2" MODIFIED="1700000000141" TEXT="monthly_rebalance_candidate_performance: パフォーマンス指標"/>
+<node CREATED="1700000000142" ID="ID_3c_3" MODIFIED="1700000000142" TEXT="monthly_rebalance_candidate_monthly_returns: 月次超過リターン時系列"/>
+<node CREATED="1700000000143" ID="ID_3c_4" MODIFIED="1700000000143" TEXT="monthly_rebalance_candidate_detailed_metrics: 詳細メトリクス"/>
+<node CREATED="1700000000144" ID="ID_3c_5" MODIFIED="1700000000144" TEXT="optimize_timeseries の結果保存先（save_to_db 時）"/>
+</node>
 <node CREATED="1700000002195" ID="ID_4b" MODIFIED="1700000002195" POSITION="left" TEXT="4. 選定・実行テーブル（strategy_runs 系）">
 <node CREATED="1700000002200" ID="ID_4b_1" MODIFIED="1700000002200" TEXT="strategy_runs（実行メタデータ）">
 <node CREATED="1700000002201" ID="ID_4b_1_1" MODIFIED="1700000002201" TEXT="主キー: run_id"/>
@@ -213,6 +220,10 @@
 <node CREATED="1700000000221" ID="ID_7_2" MODIFIED="1700000000221" TEXT="長期保有型テーブル">
 <node CREATED="1700000000222" ID="ID_7_2_1" MODIFIED="1700000000222" TEXT="接頭辞なし（標準的な命名）"/>
 <node CREATED="1700000000223" ID="ID_7_2_2" MODIFIED="1700000000223" TEXT="例: portfolio_monthly, holdings, backtest_performance"/>
+</node>
+<node CREATED="1700000000224" ID="ID_7_3" MODIFIED="1700000000224" TEXT="月次リバランス型テーブル">
+<node CREATED="1700000000225" ID="ID_7_3_1" MODIFIED="1700000000225" TEXT="接頭辞: monthly_rebalance_"/>
+<node CREATED="1700000000226" ID="ID_7_3_2" MODIFIED="1700000000226" TEXT="例: monthly_rebalance_final_selected_candidates, monthly_rebalance_candidate_performance"/>
 </node>
 </node>
 </node>

@@ -23,9 +23,11 @@
 <node CREATED="1700000000317" ID="ID_1v1_2_2" MODIFIED="1700000000317" TEXT="python -m omanta_3rd.jobs.run_strategy --mode monthly --start 2021-01-01 --end 2024-12-31"/>
 <node CREATED="1700000000318" ID="ID_1v1_2_3" MODIFIED="1700000000318" TEXT="オプション: --mode longterm|monthly, --asof または --start/--end, --no-save-new"/>
 </node>
-<node CREATED="1700000000319" ID="ID_1v1_3" MODIFIED="1700000000319" TEXT="optimize_strategy（月次最適化・PolicyParams 6 個）">
-<node CREATED="1700000000320" ID="ID_1v1_3_1" MODIFIED="1700000000320" TEXT="python -m omanta_3rd.jobs.optimize_strategy --start 2021-01-01 --end 2024-12-31 --n-trials 20 --study-name v1_study"/>
-<node CREATED="1700000000321" ID="ID_1v1_3_2" MODIFIED="1700000000321" TEXT="オプション: --start/--end 必須, --n-trials, --study-name, --cost-bps, --n-jobs"/>
+<node CREATED="1700000000319" ID="ID_1v1_3" MODIFIED="1700000000319" TEXT="optimize_timeseries（月次リバランス型最適化）">
+<node CREATED="1700000000320" ID="ID_1v1_3_1" MODIFIED="1700000000320" TEXT="python -m omanta_3rd.jobs.optimize_timeseries --start 2021-01-01 --end 2024-12-31 --n-trials 200 --cost 20 --study-name production_YYYYMMDD --no-progress-window"/>
+<node CREATED="1700000000321" ID="ID_1v1_3_2" MODIFIED="1700000000321" TEXT="オプション: --start/--end 必須, --n-trials, --study-name, --cost（bps）, --n-jobs 4, --bt-workers 1"/>
+<node CREATED="1700000000322" ID="ID_1v1_3_3" MODIFIED="1700000000322" TEXT="実運用: .\scripts\run_production_optimization.ps1（BLAS=1, 200 trials, cost 20）"/>
+<node CREATED="1700000000323" ID="ID_1v1_3_4" MODIFIED="1700000000323" TEXT="プラン: docs/5DAY_PRODUCTION_OPTIMIZATION_PLAN.md"/>
 </node>
 </node>
 <node CREATED="1700000000004" ID="ID_2" MODIFIED="1700000000004" POSITION="right" TEXT="3. データ更新（ETL）">
@@ -103,7 +105,8 @@
 <node CREATED="1700000001680" ID="ID_5_4" MODIFIED="1700000001680" TEXT="visualize_holdings_overlap.py … 保有銘柄の重複可視化"/>
 </node>
 <node CREATED="1700000001690" ID="ID_6b" MODIFIED="1700000001690" POSITION="left" TEXT="6. シェル・バッチ（.ps1 / .bat）">
-<node CREATED="1700000001691" ID="ID_6b_1" MODIFIED="1700000001691" TEXT="run_optimization_with_cache_rebuild.ps1: 最適化＋キャッシュ再構築"/>
+<node CREATED="1700000001691" ID="ID_6b_1" MODIFIED="1700000001691" TEXT="run_production_optimization.ps1: 月次リバランス実運用最適化（200 trials, cost 20bps, BLAS=1）"/>
+<node CREATED="1700000001692" ID="ID_6b_2" MODIFIED="1700000001692" TEXT="run_optimization_with_cache_rebuild.ps1: 最適化＋キャッシュ再構築"/>
 <node CREATED="1700000001694" ID="ID_6b_4" MODIFIED="1700000001694" TEXT="run_2025_live_evaluation.ps1 / .bat: 疑似ライブ評価"/>
 </node>
 <node CREATED="1700000000171" ID="ID_7" MODIFIED="1700000000171" POSITION="left" TEXT="7. データベース保存スクリプト">
@@ -128,7 +131,7 @@
 <node CREATED="1700000001881" ID="ID_9_0_1" MODIFIED="1700000001881" TEXT="1. マイグレーション: run_migration（ref_scores, strategy_runs テーブル）"/>
 <node CREATED="1700000001882" ID="ID_9_0_2" MODIFIED="1700000001882" TEXT="2. 特徴量: prepare_features --asof または --start/--end"/>
 <node CREATED="1700000001883" ID="ID_9_0_3" MODIFIED="1700000001883" TEXT="3. 選定: run_strategy --mode monthly --asof または --start/--end"/>
-<node CREATED="1700000001884" ID="ID_9_0_4" MODIFIED="1700000001884" TEXT="4. 最適化: optimize_strategy --start/--end --n-trials"/>
+<node CREATED="1700000001884" ID="ID_9_0_4" MODIFIED="1700000001884" TEXT="4. 最適化: optimize_timeseries または run_production_optimization.ps1"/>
 </node>
 <node CREATED="1700000000189" ID="ID_9_1" MODIFIED="1700000000189" TEXT="データ更新ワークフロー">
 <node CREATED="1700000000190" ID="ID_9_1_1" MODIFIED="1700000000190" TEXT="1. python update_all_data.py --target listed"/>

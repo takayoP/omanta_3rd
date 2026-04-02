@@ -4,7 +4,7 @@
 <node CREATED="1700000000001" ID="ID_1" MODIFIED="1700000000001" POSITION="right" TEXT="1. データフロー全体">
 <node CREATED="1700000000002" ID="ID_1_1" MODIFIED="1700000000002" TEXT="入力">
 <node CREATED="1700000000003" ID="ID_1_1_1" MODIFIED="1700000000003" TEXT="J-Quants API"/>
-<node CREATED="1700000000004" ID="ID_1_1_2" MODIFIED="1700000000004" TEXT="etl_update / update_all_data"/>
+<node CREATED="1700000000004" ID="ID_1_1_2" MODIFIED="1700000000004" TEXT="etl_update（python -m omanta_3rd.jobs.etl_update）/ update_all_data"/>
 <node CREATED="1700000000005" ID="ID_1_1_3" MODIFIED="1700000000005" TEXT="listed_info, prices_daily, fins_statements, index_daily"/>
 </node>
 <node CREATED="1700000000006" ID="ID_1_2" MODIFIED="1700000000006" TEXT="特徴量・スコア計算">
@@ -105,6 +105,7 @@
 </node>
 </node>
 <node CREATED="1700000000079" ID="ID_6" MODIFIED="1700000000079" POSITION="left" TEXT="6. バックテスト・評価計算">
+<node CREATED="1700000000078" ID="ID_6_0" MODIFIED="1700000000078" TEXT="先読み防止: disclosed_date&lt;=rebalance_date, as_of_date 必須（CLAUDE.md）"/>
 <node CREATED="1700000000080" ID="ID_6_1" MODIFIED="1700000000080" TEXT="売買タイミング（実運用方式）">
 <node CREATED="1700000000081" ID="ID_6_1_1" MODIFIED="1700000000081" TEXT="売却: リバランス日（月末）の始値"/>
 <node CREATED="1700000000082" ID="ID_6_1_2" MODIFIED="1700000000082" TEXT="購入: 翌リバランス日（月初）の始値"/>
@@ -121,11 +122,12 @@
 <node CREATED="1700000000091" ID="ID_6_3_3" MODIFIED="1700000000091" TEXT="objective = sharpe_excess - lambda_turnover × avg_turnover"/>
 </node>
 </node>
-<node CREATED="1700000000092" ID="ID_7" MODIFIED="1700000000092" POSITION="right" TEXT="7. 最適化（optimize_strategy）">
-<node CREATED="1700000000093" ID="ID_7_1" MODIFIED="1700000000093" TEXT="月次のみ、PolicyParams 6 パラメータを Optuna で探索"/>
-<node CREATED="1700000000095" ID="ID_7_2" MODIFIED="1700000000095" TEXT="snapshot を事前キャッシュ、trial 内は pure 関数のみ"/>
-<node CREATED="1700000000096" ID="ID_7_3" MODIFIED="1700000000096" TEXT="目的関数: objective = sharpe_excess - lambda_turnover×avg_turnover"/>
-<node CREATED="1700000000101" ID="ID_7_4" MODIFIED="1700000000101" TEXT="時系列リターン（月次 open→open）、取引コストは期間リターンから控除"/>
+<node CREATED="1700000000092" ID="ID_7" MODIFIED="1700000000092" POSITION="right" TEXT="7. 最適化">
+<node CREATED="1700000000093" ID="ID_7_1" MODIFIED="1700000000093" TEXT="月次リバランス型: optimize_timeseries（StrategyParams+EntryScoreParams を Optuna 探索）"/>
+<node CREATED="1700000000095" ID="ID_7_2" MODIFIED="1700000000095" TEXT="FeatureCache.warm で特徴量を事前計算、trial 内はキャッシュ利用（build_features は遅延インポートで循環回避）"/>
+<node CREATED="1700000000096" ID="ID_7_3" MODIFIED="1700000000096" TEXT="目的関数: Sharpe_excess（=IR）、取引コスト --cost（bps）で期間リターンから控除"/>
+<node CREATED="1700000000101" ID="ID_7_4" MODIFIED="1700000000101" TEXT="時系列リターン（月末始値→翌月始値）、実運用方式"/>
+<node CREATED="1700000000102" ID="ID_7_5" MODIFIED="1700000000102" TEXT="長期保有型: optimize_longterm（別ジョブ）"/>
 </node>
 <node CREATED="1700000000103" ID="ID_8" MODIFIED="1700000000103" POSITION="right" TEXT="8. 実行ジョブ">
 <node CREATED="1700000000104" ID="ID_8_1" MODIFIED="1700000000104" TEXT="prepare_features">
@@ -135,8 +137,10 @@
 <node CREATED="1700000000107" ID="ID_8_2_1" MODIFIED="1700000000107" TEXT="--mode longterm | monthly、--asof または --start/--end"/>
 <node CREATED="1700000000108" ID="ID_8_2_2" MODIFIED="1700000000108" TEXT="build_snapshot → score_candidates → select_portfolio、結果を portfolio_snapshots に保存可"/>
 </node>
-<node CREATED="1700000000109" ID="ID_8_3" MODIFIED="1700000000109" TEXT="optimize_strategy">
-<node CREATED="1700000000110" ID="ID_8_3_1" MODIFIED="1700000000110" TEXT="--start/--end、月次のみ PolicyParams を Optuna で探索"/>
+<node CREATED="1700000000109" ID="ID_8_3" MODIFIED="1700000000109" TEXT="月次リバランス型最適化">
+<node CREATED="1700000000110" ID="ID_8_3_1" MODIFIED="1700000000110" TEXT="optimize_timeseries: --start/--end, --n-trials, --cost, --study-name"/>
+<node CREATED="1700000000111" ID="ID_8_3_2" MODIFIED="1700000000111" TEXT="実運用: scripts/run_production_optimization.ps1（200 trials, cost 20bps）"/>
+<node CREATED="1700000000112" ID="ID_8_3_3" MODIFIED="1700000000112" TEXT="プラン: docs/5DAY_PRODUCTION_OPTIMIZATION_PLAN.md"/>
 </node>
 </node>
 </node>
