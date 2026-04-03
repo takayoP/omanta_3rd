@@ -190,19 +190,22 @@ def update_holding_performance(
                 # 翌営業日が見つからない場合は分割なし
                 split_mult = 1.0
             
-            # 分割を考慮した保有株数（実際の保有株数）
-            adjusted_shares = shares * split_mult
-            
-            # リターンと損益を計算（分割を考慮した保有株数を使用）
-            return_pct = (current_price - actual_purchase_price) / actual_purchase_price * 100.0
-            
+            # 分割調整済み現在価格（取得価格と同じ分割前基準に揃える）
+            # 例: 1→5分割後の140円 × 5 = 700円（分割前換算）
+            adjusted_current_price = current_price * split_mult
+
+            # リターンと損益を計算
+            # - 価格は分割前換算で比較（adjusted_current_price vs purchase_price）
+            # - 株数は元の取得株数を使用（shares）
+            return_pct = (adjusted_current_price - actual_purchase_price) / actual_purchase_price * 100.0
+
             if sell_date:
-                # 売却済み：実現損益（分割後の実際の保有株数で計算）
-                realized_pnl = (current_price - actual_purchase_price) * adjusted_shares
+                # 売却済み：実現損益
+                realized_pnl = (adjusted_current_price - actual_purchase_price) * shares
                 unrealized_pnl = None
             else:
-                # 保有中：含み損益（分割後の実際の保有株数で計算）
-                unrealized_pnl = (current_price - actual_purchase_price) * adjusted_shares
+                # 保有中：含み損益
+                unrealized_pnl = (adjusted_current_price - actual_purchase_price) * shares
                 realized_pnl = None
             
             # TOPIXのパフォーマンスを取得（購入日の始値を使用）
@@ -526,11 +529,11 @@ def get_holdings(
         else:
             query = "SELECT * FROM holdings ORDER BY purchase_date DESC, code"
         
-        holdings_df = pd.read_sql_query(query, conn, params=params)
-        
+        holdings_df = pd.read_sql_query(query, conn)
+
         if holdings_df.empty:
             return []
-        
+
         return holdings_df.to_dict("records")
 
 
